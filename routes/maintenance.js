@@ -154,7 +154,9 @@ router.post('/:id/start', authenticate, requireAdmin, async (req, res) => {
 
 router.post('/:id/complete', authenticate, requireAdmin, async (req, res) => {
   const { id } = req.params;
-  const { repair_result, repair_cost, damage_note } = req.body;
+  let { repair_result, repair_note, repair_cost, damage_note } = req.body;
+
+  repair_result = repair_result || repair_note;
 
   if (!repair_result) {
     return res.status(400).json({

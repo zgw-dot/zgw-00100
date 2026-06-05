@@ -67,8 +67,15 @@ router.get('/logs', authenticate, requireAdmin, async (req, res) => {
   res.json({ logs });
 });
 
-router.get('/timeline/:equipment_id', authenticate, async (req, res) => {
-  const { equipment_id } = req.params;
+router.get('/timeline/:equipment_id?', authenticate, async (req, res) => {
+  const equipment_id = req.params.equipment_id || req.query.equipment_id;
+
+  if (!equipment_id) {
+    return res.status(400).json({
+      error: '请指定设备ID',
+      code: 'MISSING_EQUIPMENT_ID'
+    });
+  }
 
   const equipment = await get('SELECT * FROM equipment WHERE id = ?', [equipment_id]);
   if (!equipment) {
@@ -157,7 +164,7 @@ function getMaintenanceActionText(event) {
   return statusMap[event.status] || '维修事件';
 }
 
-router.get('/export', authenticate, requireAdmin, async (req, res) => {
+const exportHandler = async (req, res) => {
   const { format = 'csv', equipment_id, start_date, end_date } = req.query;
 
   let sql = `
@@ -246,7 +253,7 @@ router.get('/export', authenticate, requireAdmin, async (req, res) => {
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
   res.setHeader('Content-Disposition', `attachment; filename="audit_export_${Date.now()}.csv"`);
   res.send(bom + csvContent);
-});
+};
 
 function getBorrowStatusText(status) {
   const map = {
@@ -259,5 +266,9 @@ function getBorrowStatusText(status) {
   };
   return map[status] || status;
 }
+
+router.get('/export', authenticate, requireAdmin, exportHandler);
+router.get('/export/equipment', authenticate, requireAdmin, exportHandler);
+router.get('/export/borrow', authenticate, requireAdmin, exportHandler);
 
 module.exports = router;
