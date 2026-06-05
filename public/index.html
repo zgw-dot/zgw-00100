@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>设备借还与维保预约平台</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="app">
+    <header class="header">
+      <div class="header-content">
+        <h1>🔧 设备借还与维保预约平台</h1>
+        <div class="user-info">
+          <span id="userDisplay">未登录</span>
+          <select id="userSelector">
+            <option value="">切换用户</option>
+            <option value="1">管理员 - 系统管理员</option>
+            <option value="2">普通用户 - 张三</option>
+            <option value="3">普通用户 - 李四</option>
+            <option value="4">普通用户 - 王五</option>
+          </select>
+        </div>
+      </div>
+    </header>
+
+    <nav class="nav-tabs">
+      <button class="nav-tab active" data-tab="equipment">📦 设备台账</button>
+      <button class="nav-tab" data-tab="borrow">📋 借用申请</button>
+      <button class="nav-tab" data-tab="maintenance">🔩 维修管理</button>
+      <button class="nav-tab" data-tab="history">📜 历史记录</button>
+      <button class="nav-tab" data-tab="audit">📊 审计导出</button>
+    </nav>
+
+    <main class="content">
+      <section id="equipment-tab" class="tab-content active">
+        <div class="toolbar">
+          <div class="filters">
+            <select id="equipmentStatusFilter">
+              <option value="">全部状态</option>
+              <option value="available">可用</option>
+              <option value="borrowed">已借出</option>
+              <option value="maintenance">维修中</option>
+              <option value="frozen">冻结</option>
+            </select>
+            <input type="text" id="equipmentSearch" placeholder="搜索设备编号/名称...">
+          </div>
+          <div class="actions">
+            <button id="addEquipmentBtn" class="btn btn-primary" style="display:none;">+ 新增设备</button>
+          </div>
+        </div>
+        <div class="table-container">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>设备编号</th>
+                <th>设备名称</th>
+                <th>分类</th>
+                <th>型号</th>
+                <th>位置</th>
+                <th>状态</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="equipmentTableBody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="borrow-tab" class="tab-content">
+        <div class="toolbar">
+          <div class="filters">
+            <select id="borrowStatusFilter">
+              <option value="">全部状态</option>
+              <option value="pending">待审批</option>
+              <option value="approved">已批准</option>
+              <option value="rejected">已拒绝</option>
+              <option value="collected">已领用</option>
+              <option value="returned">已归还</option>
+              <option value="cancelled">已取消</option>
+            </select>
+          </div>
+          <div class="actions">
+            <button id="applyBorrowBtn" class="btn btn-primary">+ 申请借用</button>
+          </div>
+        </div>
+        <div class="table-container">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>申请单号</th>
+                <th>设备</th>
+                <th>申请人</th>
+                <th>用途</th>
+                <th>借用时间</th>
+                <th>状态</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="borrowTableBody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="maintenance-tab" class="tab-content">
+        <div class="toolbar">
+          <div class="filters">
+            <select id="maintenanceStatusFilter">
+              <option value="">全部状态</option>
+              <option value="pending">待处理</option>
+              <option value="in_progress">维修中</option>
+              <option value="completed">已完成</option>
+            </select>
+          </div>
+          <div class="actions">
+            <button id="reportMaintenanceBtn" class="btn btn-warning">+ 报修</button>
+          </div>
+        </div>
+        <div class="table-container">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>设备</th>
+                <th>报修人</th>
+                <th>问题描述</th>
+                <th>状态</th>
+                <th>创建时间</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="maintenanceTableBody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="history-tab" class="tab-content">
+        <div class="toolbar">
+          <div class="filters">
+            <select id="historyEquipmentFilter">
+              <option value="">选择设备查看时间线</option>
+            </select>
+          </div>
+        </div>
+        <div id="timelineContainer"></div>
+      </section>
+
+      <section id="audit-tab" class="tab-content">
+        <div class="audit-section">
+          <h3>📤 数据导出</h3>
+          <div class="export-options">
+            <div class="export-card">
+              <h4>设备台账导出</h4>
+              <div class="export-form">
+                <label>
+                  <span>设备:</span>
+                  <select id="exportEquipmentId">
+                    <option value="">全部设备</option>
+                  </select>
+                </label>
+                <label>
+                  <span>开始日期:</span>
+                  <input type="date" id="exportEquipmentStart">
+                </label>
+                <label>
+                  <span>结束日期:</span>
+                  <input type="date" id="exportEquipmentEnd">
+                </label>
+                <label>
+                  <span>格式:</span>
+                  <select id="exportEquipmentFormat">
+                    <option value="csv">CSV</option>
+                    <option value="json">JSON</option>
+                  </select>
+                </label>
+                <button class="btn btn-primary" onclick="exportEquipment()">导出设备数据</button>
+              </div>
+            </div>
+            <div class="export-card">
+              <h4>借用记录导出</h4>
+              <div class="export-form">
+                <label>
+                  <span>设备:</span>
+                  <select id="exportBorrowEquipmentId">
+                    <option value="">全部设备</option>
+                  </select>
+                </label>
+                <label>
+                  <span>开始日期:</span>
+                  <input type="date" id="exportBorrowStart">
+                </label>
+                <label>
+                  <span>结束日期:</span>
+                  <input type="date" id="exportBorrowEnd">
+                </label>
+                <label>
+                  <span>格式:</span>
+                  <select id="exportBorrowFormat">
+                    <option value="csv">CSV</option>
+                    <option value="json">JSON</option>
+                  </select>
+                </label>
+                <button class="btn btn-primary" onclick="exportBorrow()">导出借用记录</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="audit-section" style="display:none;" id="auditLogsSection">
+          <h3>📝 审计日志</h3>
+          <div class="toolbar">
+            <div class="filters">
+              <select id="auditActionFilter">
+                <option value="">全部操作</option>
+              </select>
+              <select id="auditTypeFilter">
+                <option value="">全部类型</option>
+                <option value="equipment">设备</option>
+                <option value="borrow_request">借用申请</option>
+                <option value="maintenance">维修记录</option>
+              </select>
+            </div>
+          </div>
+          <div class="table-container">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>时间</th>
+                  <th>操作人</th>
+                  <th>操作类型</th>
+                  <th>目标类型</th>
+                  <th>详情</th>
+                </tr>
+              </thead>
+              <tbody id="auditTableBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div id="modal" class="modal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3 id="modalTitle">标题</h3>
+        <button class="close-btn" onclick="closeModal()">&times;</button>
+      </div>
+      <div class="modal-body" id="modalBody"></div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>

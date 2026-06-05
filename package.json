@@ -1,0 +1,21 @@
+{
+  "name": "equipment-borrowing-platform",
+  "version": "1.0.0",
+  "description": "本地设备借还与维保预约平台",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "seed": "node seed.js",
+    "reset": "node -e \"const fs = require('fs'); if(fs.existsSync('./data/equipment.db')) fs.unlinkSync('./data/equipment.db'); console.log('Database reset')\""
+  },
+  "keywords": ["equipment", "borrowing", "maintenance"],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.18.2",
+    "sqlite3": "^5.1.7",
+    "cors": "^2.8.5",
+    "moment": "^2.29.4"
+  }
+}
