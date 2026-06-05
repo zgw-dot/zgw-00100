@@ -1,7 +1,86 @@
 const express = require('express');
 const router = express.Router();
-const { get, all, getTimelineEvents, getEventText, getSourceType } = require('../database');
+const {
+  get,
+  all,
+  getTimelineEvents,
+  getEventText,
+  getSourceType,
+  logAction,
+  createAuditView,
+  getAuditViewById,
+  getAuditViewByName,
+  getAllAuditViews,
+  updateAuditView,
+  deleteAuditView,
+  EVENT_TYPE_MAP
+} = require('../database');
 const { authenticate, requireAdmin } = require('../middleware/auth');
+
+const VALID_EVENT_TYPES = Object.keys(EVENT_TYPE_MAP);
+const VALID_EXPORT_FORMATS = ['json', 'csv'];
+
+function validateViewParams(params, isUpdate = false) {
+  const errors = [];
+
+  if (!isUpdate) {
+    if (!params.name || typeof params.name !== 'string' || params.name.trim().length === 0) {
+      errors.push('视图名称不能为空');
+    } else if (params.name.length > 100) {
+      errors.push('视图名称不能超过100个字符');
+    }
+  }
+
+  if (params.name !== undefined && params.name !== null) {
+    if (typeof params.name !== 'string' || params.name.trim().length === 0) {
+      errors.push('视图名称不能为空');
+    } else if (params.name.length > 100) {
+      errors.push('视图名称不能超过100个字符');
+    }
+  }
+
+  if (params.export_format !== undefined) {
+    if (!VALID_EXPORT_FORMATS.includes(params.export_format)) {
+      errors.push(`导出格式必须是以下之一: ${VALID_EXPORT_FORMATS.join(', ')}`);
+    }
+  }
+
+  if (params.event_types !== undefined && params.event_types !== null) {
+    if (!Array.isArray(params.event_types)) {
+      errors.push('事件类型必须是数组');
+    } else {
+      for (const et of params.event_types) {
+        if (!VALID_EVENT_TYPES.includes(et)) {
+          errors.push(`无效的事件类型: ${et}，有效值: ${VALID_EVENT_TYPES.join(', ')}`);
+        }
+      }
+    }
+  }
+
+  if (params.start_date !== undefined && params.start_date !== null) {
+    const date = new Date(params.start_date);
+    if (isNaN(date.getTime())) {
+      errors.push('开始日期格式无效');
+    }
+  }
+
+  if (params.end_date !== undefined && params.end_date !== null) {
+    const date = new Date(params.end_date);
+    if (isNaN(date.getTime())) {
+      errors.push('结束日期格式无效');
+    }
+  }
+
+  if (params.start_date && params.end_date) {
+    const start = new Date(params.start_date);
+    const end = new Date(params.end_date);
+    if (start > end) {
+      errors.push('开始日期不能晚于结束日期');
+    }
+  }
+
+  return errors;
+}
 
 function getActionText(action) {
   const map = {
@@ -313,17 +392,50 @@ function filterTimelineByPermission(events, user) {
 }
 
 const exportTimelineHandler = async (req, res) => {
-  const { format = 'csv', equipment_id, start_date, end_date } = req.query;
+  const { format = 'csv', equipment_id, start_date, end_date, event_types, view_id, view_name } = req.query;
 
-  if (format !== 'csv' && format !== 'json') {
+  let view = null;
+  if (view_id) {
+    view = await getAuditViewById(view_id);
+    if (!view) {
+      return res.status(404).json({
+        error: '视图不存在',
+        code: 'VIEW_NOT_FOUND'
+      });
+    }
+  } else if (view_name) {
+    view = await getAuditViewByName(view_name);
+    if (!view) {
+      return res.status(404).json({
+        error: '视图不存在',
+        code: 'VIEW_NOT_FOUND'
+      });
+    }
+  }
+
+  let effectiveFormat = format;
+  let effectiveEquipmentId = equipment_id;
+  let effectiveStartDate = start_date;
+  let effectiveEndDate = end_date;
+  let effectiveEventTypes = event_types;
+
+  if (view) {
+    effectiveFormat = view.export_format;
+    if (view.equipment_id !== null) effectiveEquipmentId = view.equipment_id;
+    if (view.start_date !== null) effectiveStartDate = view.start_date;
+    if (view.end_date !== null) effectiveEndDate = view.end_date;
+    if (view.event_types && view.event_types.length > 0) effectiveEventTypes = view.event_types;
+  }
+
+  if (effectiveFormat !== 'csv' && effectiveFormat !== 'json') {
     return res.status(400).json({
       error: '不支持的导出格式，仅支持 csv 和 json',
       code: 'INVALID_EXPORT_FORMAT'
     });
   }
 
-  if (equipment_id) {
-    const equipment = await get('SELECT * FROM equipment WHERE id = ?', [equipment_id]);
+  if (effectiveEquipmentId) {
+    const equipment = await get('SELECT * FROM equipment WHERE id = ?', [effectiveEquipmentId]);
     if (!equipment) {
       return res.status(404).json({
         error: '设备不存在',
@@ -332,27 +444,63 @@ const exportTimelineHandler = async (req, res) => {
     }
   }
 
-  const events = await getTimelineEvents(equipment_id, start_date, end_date);
+  let parsedEventTypes = null;
+  if (effectiveEventTypes) {
+    if (typeof effectiveEventTypes === 'string') {
+      try {
+        parsedEventTypes = JSON.parse(effectiveEventTypes);
+      } catch (e) {
+        parsedEventTypes = effectiveEventTypes.split(',').map(s => s.trim());
+      }
+    } else if (Array.isArray(effectiveEventTypes)) {
+      parsedEventTypes = effectiveEventTypes;
+    }
+  }
+
+  const events = await getTimelineEvents(effectiveEquipmentId, effectiveStartDate, effectiveEndDate, parsedEventTypes);
 
   const exportMeta = {
     exported_at: new Date().toISOString(),
     exported_by: req.user.name,
     exported_by_id: req.user.id,
     filters: {
-      equipment_id: equipment_id || null,
-      start_date: start_date || null,
-      end_date: end_date || null,
-      format: format
+      equipment_id: effectiveEquipmentId || null,
+      start_date: effectiveStartDate || null,
+      end_date: effectiveEndDate || null,
+      event_types: parsedEventTypes || null,
+      format: effectiveFormat
     },
     event_count: events.length,
-    equipment_info: equipment_id ? await get('SELECT id, device_code, name FROM equipment WHERE id = ?', [equipment_id]) : null
+    equipment_info: effectiveEquipmentId ? await get('SELECT id, device_code, name FROM equipment WHERE id = ?', [effectiveEquipmentId]) : null
   };
 
-  if (format === 'json') {
+  if (view) {
+    exportMeta.view_name = view.name;
+    exportMeta.view_version = view.version;
+    exportMeta.view_id = view.id;
+
+    logAction(
+      req.user.id,
+      'EXPORT_AUDIT_VIEW',
+      'audit_view',
+      view.id,
+      {
+        view_name: view.name,
+        view_version: view.version,
+        format: effectiveFormat,
+        event_count: events.length
+      },
+      req.ip
+    ).catch(err => console.error('记录审计日志失败:', err));
+  }
+
+  if (effectiveFormat === 'json') {
     res.setHeader('Content-Type', 'application/json; charset=utf-8');
-    const filename = equipment_id
-      ? `timeline_equipment_${equipment_id}_${Date.now()}.json`
-      : `timeline_all_${Date.now()}.json`;
+    const filename = view
+      ? `timeline_view_${view.name.replace(/[^a-zA-Z0-9_-]/g, '_')}_${Date.now()}.json`
+      : effectiveEquipmentId
+        ? `timeline_equipment_${effectiveEquipmentId}_${Date.now()}.json`
+        : `timeline_all_${Date.now()}.json`;
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     return res.json({
       meta: exportMeta,
@@ -389,9 +537,11 @@ const exportTimelineHandler = async (req, res) => {
   ].join('\n');
 
   const bom = '\uFEFF';
-  const filename = equipment_id
-    ? `timeline_equipment_${equipment_id}_${Date.now()}.csv`
-    : `timeline_all_${Date.now()}.csv`;
+  const filename = view
+    ? `timeline_view_${view.name.replace(/[^a-zA-Z0-9_-]/g, '_')}_${Date.now()}.csv`
+    : effectiveEquipmentId
+      ? `timeline_equipment_${effectiveEquipmentId}_${Date.now()}.csv`
+      : `timeline_all_${Date.now()}.csv`;
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
   res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
   res.send(bom + csvContent);
@@ -425,5 +575,190 @@ router.get('/export', authenticate, requireAdmin, exportBorrowHandler);
 router.get('/export/equipment', authenticate, requireAdmin, exportEquipmentHandler);
 router.get('/export/borrow', authenticate, requireAdmin, exportBorrowHandler);
 router.get('/export/timeline', authenticate, requireAdmin, exportTimelineHandler);
+
+router.post('/views', authenticate, requireAdmin, async (req, res) => {
+  try {
+    const errors = validateViewParams(req.body, false);
+    if (errors.length > 0) {
+      return res.status(400).json({
+        error: '参数验证失败',
+        code: 'INVALID_VIEW_PARAMS',
+        details: errors
+      });
+    }
+
+    const existingView = await getAuditViewByName(req.body.name);
+    if (existingView) {
+      return res.status(409).json({
+        error: `视图名称 "${req.body.name}" 已存在`,
+        code: 'VIEW_NAME_DUPLICATE'
+      });
+    }
+
+    if (req.body.equipment_id) {
+      const equipment = await get('SELECT * FROM equipment WHERE id = ?', [req.body.equipment_id]);
+      if (!equipment) {
+        return res.status(404).json({
+          error: '设备不存在',
+          code: 'EQUIPMENT_NOT_FOUND'
+        });
+      }
+    }
+
+    const view = await createAuditView(req.body, req.user.id);
+
+    logAction(
+      req.user.id,
+      'CREATE_AUDIT_VIEW',
+      'audit_view',
+      view.id,
+      {
+        view_name: view.name,
+        filters: {
+          equipment_id: view.equipment_id,
+          start_date: view.start_date,
+          end_date: view.end_date,
+          event_types: view.event_types,
+          export_format: view.export_format
+        }
+      },
+      req.ip
+    ).catch(err => console.error('记录审计日志失败:', err));
+
+    res.status(201).json({ view });
+  } catch (err) {
+    if (err.message && err.message.includes('UNIQUE constraint failed')) {
+      return res.status(409).json({
+        error: `视图名称 "${req.body.name}" 已存在`,
+        code: 'VIEW_NAME_DUPLICATE'
+      });
+    }
+    throw err;
+  }
+});
+
+router.get('/views', authenticate, requireAdmin, async (req, res) => {
+  const views = await getAllAuditViews();
+  res.json({ views });
+});
+
+router.get('/views/:id', authenticate, requireAdmin, async (req, res) => {
+  const view = await getAuditViewById(req.params.id);
+  if (!view) {
+    return res.status(404).json({
+      error: '视图不存在',
+      code: 'VIEW_NOT_FOUND'
+    });
+  }
+  res.json({ view });
+});
+
+router.put('/views/:id', authenticate, requireAdmin, async (req, res) => {
+  try {
+    const view = await getAuditViewById(req.params.id);
+    if (!view) {
+      return res.status(404).json({
+        error: '视图不存在',
+        code: 'VIEW_NOT_FOUND'
+      });
+    }
+
+    const errors = validateViewParams(req.body, true);
+    if (errors.length > 0) {
+      return res.status(400).json({
+        error: '参数验证失败',
+        code: 'INVALID_VIEW_PARAMS',
+        details: errors
+      });
+    }
+
+    if (req.body.name && req.body.name !== view.name) {
+      const existingView = await getAuditViewByName(req.body.name);
+      if (existingView) {
+        return res.status(409).json({
+          error: `视图名称 "${req.body.name}" 已存在`,
+          code: 'VIEW_NAME_DUPLICATE'
+        });
+      }
+    }
+
+    if (req.body.equipment_id) {
+      const equipment = await get('SELECT * FROM equipment WHERE id = ?', [req.body.equipment_id]);
+      if (!equipment) {
+        return res.status(404).json({
+          error: '设备不存在',
+          code: 'EQUIPMENT_NOT_FOUND'
+        });
+      }
+    }
+
+    const updatedView = await updateAuditView(req.params.id, req.body);
+
+    logAction(
+      req.user.id,
+      'UPDATE_AUDIT_VIEW',
+      'audit_view',
+      updatedView.id,
+      {
+        old_name: view.name,
+        new_name: updatedView.name,
+        new_version: updatedView.version,
+        changes: req.body
+      },
+      req.ip
+    ).catch(err => console.error('记录审计日志失败:', err));
+
+    res.json({ view: updatedView });
+  } catch (err) {
+    if (err.message && err.message.includes('UNIQUE constraint failed')) {
+      return res.status(409).json({
+        error: `视图名称 "${req.body.name}" 已存在`,
+        code: 'VIEW_NAME_DUPLICATE'
+      });
+    }
+    throw err;
+  }
+});
+
+router.delete('/views/:id', authenticate, requireAdmin, async (req, res) => {
+  const view = await getAuditViewById(req.params.id);
+  if (!view) {
+    return res.status(404).json({
+      error: '视图不存在',
+      code: 'VIEW_NOT_FOUND'
+    });
+  }
+
+  const deleted = await deleteAuditView(req.params.id);
+  if (!deleted) {
+    return res.status(500).json({
+      error: '删除视图失败',
+      code: 'VIEW_DELETE_FAILED'
+    });
+  }
+
+  logAction(
+    req.user.id,
+    'DELETE_AUDIT_VIEW',
+    'audit_view',
+    null,
+    {
+      view_name: view.name,
+      view_id: view.id
+    },
+    req.ip
+  ).catch(err => console.error('记录审计日志失败:', err));
+
+  res.json({ message: '视图删除成功' });
+});
+
+router.get('/event-types', authenticate, async (req, res) => {
+  const eventTypes = VALID_EVENT_TYPES.map(type => ({
+    type,
+    text: getEventText(type),
+    source_type: getSourceType(type)
+  }));
+  res.json({ event_types: eventTypes });
+});
 
 module.exports = router;

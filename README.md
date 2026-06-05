@@ -15,6 +15,7 @@
 - **📜 历史记录**：按设备查看完整时间线（借用、维修、操作日志），普通用户自动脱敏
 - **📊 审计导出**：按设备或日期导出 CSV/JSON 格式的设备台账和借用记录
 - **📅 设备使用与维保日历包**：管理员专属导出，整合借用、归还、取消、维修全生命周期事件及冲突拦截记录
+- **📁 审计视图**：管理员可保存常用筛选条件为命名视图，一键重复导出，支持版本管理和权限控制
 
 ### 权限控制
 - **管理员**：设备管理、审批申请、维修管理、审计日志、数据导出
@@ -69,6 +70,9 @@ npm run test-restart
 
 # 运行时间线导出功能验证脚本
 npm run test-timeline-export
+
+# 运行审计视图功能验证脚本
+npm run test-audit-views
 
 # 运行所有测试
 npm run test-all
@@ -527,6 +531,7 @@ A.start < B.end AND A.end > B.start
 | `borrow_requests` | 借用申请表（包含审批、领用、归还信息） |
 | `maintenance_records` | 维修记录表 |
 | `audit_logs` | 审计日志表（记录所有操作） |
+| `audit_views` | 审计视图表（管理员保存的命名筛选条件） |
 
 ### 数据完整性保证
 
@@ -685,11 +690,86 @@ A.start < B.end AND A.end > B.start
 }
 ```
 
+---
+
+### 📁 审计视图（可保存的审计导出视图）
+
+管理员可以将常用的导出筛选条件保存为命名视图，以后一键导出，无需重复设置条件。
+
+#### 功能特点
+
+- **一键导出**：保存筛选条件后，通过视图 ID 或名称即可直接导出
+- **版本管理**：每次修改视图条件自动递增版本号，便于追溯
+- **持久化存储**：视图存储在 SQLite 中，服务重启后仍然可用
+- **权限隔离**：仅管理员可创建、查看、修改、删除审计视图
+- **审计追踪**：所有视图操作（创建、修改、删除、使用导出）都记录审计日志
+- **元数据注入**：使用视图导出时，导出元数据自动包含视图名称、版本、操作者
+
+#### 视图保存的筛选条件
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `name` | string | 是 | 视图名称，唯一，最多 100 字符 |
+| `description` | string | 否 | 视图描述说明 |
+| `equipment_id` | number | 否 | 指定设备ID |
+| `start_date` | string | 否 | 开始日期，格式 `YYYY-MM-DD` 或 `YYYY-MM-DD HH:mm:ss` |
+| `end_date` | string | 否 | 结束日期，格式 `YYYY-MM-DD` 或 `YYYY-MM-DD HH:mm:ss` |
+| `event_types` | array | 否 | 事件类型数组，如 `["borrow_created", "borrow_conflict_blocked"]` |
+| `export_format` | string | 是 | 导出格式：`json` 或 `csv` |
+
+#### 按视图导出的元数据
+
+使用视图导出时，JSON 格式的 `meta` 字段会额外包含：
+
+```json
+{
+  "meta": {
+    "view_name": "每周设备审计",
+    "view_version": 3,
+    "view_id": 5,
+    "exported_at": "2026-06-05T10:30:00.000Z",
+    "exported_by": "系统管理员",
+    "exported_by_id": 1,
+    "...": "其他字段..."
+  }
+}
+```
+
+#### 冲突拦截事件筛选
+
+审计视图支持专门筛选冲突拦截事件，用于定期审计被拒绝的申请：
+
+```javascript
+// 示例：只筛选冲突拦截事件的视图
+{
+  "name": "冲突拦截审计",
+  "event_types": ["borrow_conflict_blocked", "maintenance_conflict_blocked"],
+  "export_format": "json"
+}
+```
+
+#### 权限控制说明
+
+| 操作 | 管理员 | 普通用户 |
+|------|--------|----------|
+| 创建视图 | ✅ | ❌ 返回 403，记录审计日志 |
+| 查询视图列表 | ✅ | ❌ 返回 403，记录审计日志 |
+| 查询视图详情 | ✅ | ❌ 返回 403，记录审计日志 |
+| 修改视图（含重命名） | ✅ | ❌ 返回 403，记录审计日志 |
+| 删除视图 | ✅ | ❌ 返回 403，记录审计日志 |
+| 按视图导出 | ✅ | ❌ 返回 403，记录审计日志 |
+
+> **安全说明**：普通用户的所有越权尝试都会被记录到审计日志，action 为 `UNAUTHORIZED_ACCESS_ATTEMPT`，包含尝试的路径、方法和用户角色。
+
+---
+
 ### 通用导出筛选条件
 
 - **按设备**：选择特定设备导出相关记录
 - **按日期**：指定开始和结束日期筛选
+- **按事件类型**：指定事件类型数组筛选（支持冲突拦截事件）
 - **格式选择**：CSV（适合 Excel 打开）或 JSON（适合程序处理）
+- **按视图导出**：使用保存的审计视图 ID 或名称导出
 
 ### 导出一致性保证
 
@@ -753,6 +833,12 @@ A.start < B.end AND A.end > B.start
 | GET | `/audit/timeline` | 获取设备时间线 | 所有用户 |
 | GET | `/audit/timeline?equipment_id=:id` | 按设备查询时间线（查询参数） | 所有用户 |
 | GET | `/audit/timeline/:equipment_id` | 按设备查询时间线（路径参数） | 所有用户 |
+| **GET** | **`/audit/event-types`** | **获取可用事件类型列表** | **所有用户** |
+| **POST** | **`/audit/views`** | **创建审计视图** | **仅管理员** |
+| **GET** | **`/audit/views`** | **获取所有审计视图列表** | **仅管理员** |
+| **GET** | **`/audit/views/:id`** | **获取单个审计视图详情** | **仅管理员** |
+| **PUT** | **`/audit/views/:id`** | **更新审计视图（含重命名）** | **仅管理员** |
+| **DELETE** | **`/audit/views/:id`** | **删除审计视图** | **仅管理员** |
 
 #### 设备使用与维保日历包导出接口说明
 
@@ -797,6 +883,214 @@ A.start < B.end AND A.end > B.start
 **借用记录导出字段**：
 申请单号、设备编号、设备名称、设备分类、申请人、审批人、借用用途、开始时间、结束时间、状态、领用时间、归还时间、验收结果、损坏备注、审批意见、创建时间
 
+---
+
+#### 审计视图接口说明
+
+##### 1. 创建审计视图
+
+**接口**：`POST /api/audit/views`
+
+**请求体**：
+```json
+{
+  "name": "每周设备审计",
+  "description": "每周一导出的全量审计数据",
+  "equipment_id": 1,
+  "start_date": "2026-06-01",
+  "end_date": "2026-06-30",
+  "event_types": ["borrow_created", "borrow_approved", "borrow_conflict_blocked"],
+  "export_format": "json"
+}
+```
+
+**成功响应**（HTTP 201）：
+```json
+{
+  "view": {
+    "id": 1,
+    "name": "每周设备审计",
+    "description": "每周一导出的全量审计数据",
+    "equipment_id": 1,
+    "start_date": "2026-06-01",
+    "end_date": "2026-06-30",
+    "event_types": ["borrow_created", "borrow_approved", "borrow_conflict_blocked"],
+    "export_format": "json",
+    "version": 1,
+    "created_by": 1,
+    "created_at": "2026-06-05T10:00:00.000Z",
+    "updated_at": "2026-06-05T10:00:00.000Z"
+  }
+}
+```
+
+**失败响应**：
+- HTTP 400 `INVALID_VIEW_PARAMS`：参数验证失败，包含详细错误列表
+- HTTP 409 `VIEW_NAME_DUPLICATE`：视图名称已存在
+- HTTP 404 `EQUIPMENT_NOT_FOUND`：指定的设备不存在
+
+##### 2. 查询所有审计视图
+
+**接口**：`GET /api/audit/views`
+
+**成功响应**（HTTP 200）：
+```json
+{
+  "views": [
+    {
+      "id": 1,
+      "name": "每周设备审计",
+      "description": "每周一导出的全量审计数据",
+      "version": 2,
+      "export_format": "json",
+      "created_at": "2026-06-05T10:00:00.000Z",
+      "updated_at": "2026-06-05T11:00:00.000Z"
+    }
+  ]
+}
+```
+
+##### 3. 查询单个审计视图详情
+
+**接口**：`GET /api/audit/views/:id`
+
+**成功响应**（HTTP 200）：
+```json
+{
+  "view": {
+    "id": 1,
+    "name": "每周设备审计",
+    "description": "每周一导出的全量审计数据",
+    "equipment_id": 1,
+    "start_date": "2026-06-01",
+    "end_date": "2026-06-30",
+    "event_types": ["borrow_created", "borrow_approved"],
+    "export_format": "json",
+    "version": 2,
+    "created_by": 1,
+    "created_at": "2026-06-05T10:00:00.000Z",
+    "updated_at": "2026-06-05T11:00:00.000Z"
+  }
+}
+```
+
+**失败响应**：
+- HTTP 404 `VIEW_NOT_FOUND`：视图不存在
+
+##### 4. 更新审计视图（含重命名）
+
+**接口**：`PUT /api/audit/views/:id`
+
+**请求体**（可更新部分或全部字段）：
+```json
+{
+  "name": "每周设备审计_v2",
+  "description": "更新后的描述",
+  "export_format": "csv",
+  "event_types": ["borrow_conflict_blocked"]
+}
+```
+
+**成功响应**（HTTP 200）：
+```json
+{
+  "view": {
+    "id": 1,
+    "name": "每周设备审计_v2",
+    "version": 3,
+    "...": "其他字段..."
+  }
+}
+```
+
+> **注意**：每次成功更新都会自动递增 `version` 字段。
+
+**失败响应**：
+- HTTP 404 `VIEW_NOT_FOUND`：视图不存在
+- HTTP 400 `INVALID_VIEW_PARAMS`：参数验证失败
+- HTTP 409 `VIEW_NAME_DUPLICATE`：新名称已存在
+
+##### 5. 删除审计视图
+
+**接口**：`DELETE /api/audit/views/:id`
+
+**成功响应**（HTTP 200）：
+```json
+{
+  "message": "视图删除成功"
+}
+```
+
+**失败响应**：
+- HTTP 404 `VIEW_NOT_FOUND`：视图不存在
+
+##### 6. 按视图导出
+
+**接口**：`GET /api/audit/export/timeline?view_id=:id` 或 `?view_name=:name`
+
+**参数**：
+- `view_id`：视图 ID
+- `view_name`：视图名称（URL 编码）
+
+> **注意**：不能同时指定 `view_id` 和 `view_name`，如果同时指定，`view_id` 优先。
+
+**成功响应**：
+与即时导出格式相同，但 `meta` 字段额外包含 `view_name`、`view_version`、`view_id`。
+
+**失败响应**：
+- HTTP 404 `VIEW_NOT_FOUND`：视图不存在或已删除
+
+##### 7. 获取事件类型列表
+
+**接口**：`GET /api/audit/event-types`
+
+**成功响应**（HTTP 200）：
+```json
+{
+  "event_types": [
+    {
+      "type": "borrow_created",
+      "text": "提交借用申请",
+      "source_type": "borrow"
+    },
+    {
+      "type": "borrow_conflict_blocked",
+      "text": "借用申请因冲突被拦截",
+      "source_type": "audit"
+    }
+  ]
+}
+```
+
+#### 用户可见影响
+
+- **管理员**：
+  - 在审计导出页面可以看到「保存视图」和「我的视图」功能
+  - 可以管理（创建、查看、修改、删除）自己创建的审计视图
+  - 使用视图导出时，导出文件自动包含视图元数据
+  - 可以在审计日志中查看所有视图操作记录
+
+- **普通用户**：
+  - 页面上不显示任何审计视图相关功能
+  - 无法通过 API 访问任何视图接口（返回 403）
+  - 越权访问尝试会被记录到审计日志
+  - 仍然可以正常查看设备时间线（自动脱敏）
+  - 仍然可以正常提交借用和维修申请
+
+- **导出文件变化**：
+  - 使用视图导出的 JSON 文件在 `meta` 中新增 `view_name`、`view_version`、`view_id` 字段
+  - 导出文件名会包含视图名称（如 `timeline_view_每周设备审计_1234567890.json`）
+  - 即时导出（不使用视图）的文件格式保持不变
+
+#### 错误码新增
+
+| 错误码 | 说明 |
+|--------|------|
+| `VIEW_NAME_DUPLICATE` | 视图名称已存在 |
+| `VIEW_NOT_FOUND` | 视图不存在或已删除 |
+| `INVALID_VIEW_PARAMS` | 视图参数验证失败 |
+| `VIEW_DELETE_FAILED` | 视图删除失败 |
+
 ## 🛠️ 技术栈
 
 - **后端框架**：Express.js
@@ -825,6 +1119,10 @@ A.start < B.end AND A.end > B.start
 | `ADMIN_REQUIRED` | 需要管理员权限 |
 | `ACCESS_DENIED` | 无访问权限 |
 | `INVALID_EXPORT_FORMAT` | 不支持的导出格式 |
+| `VIEW_NAME_DUPLICATE` | 审计视图名称已存在 |
+| `VIEW_NOT_FOUND` | 审计视图不存在或已删除 |
+| `INVALID_VIEW_PARAMS` | 审计视图参数验证失败 |
+| `VIEW_DELETE_FAILED` | 审计视图删除失败 |
 
 ## 📄 License
 

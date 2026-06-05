@@ -133,11 +133,31 @@ async function initDatabase() {
     )
   `;
 
+  const createAuditViewsTable = `
+    CREATE TABLE IF NOT EXISTS audit_views (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT UNIQUE NOT NULL,
+      description TEXT,
+      equipment_id INTEGER,
+      start_date TEXT,
+      end_date TEXT,
+      event_types TEXT,
+      export_format TEXT NOT NULL CHECK(export_format IN ('json', 'csv')),
+      version INTEGER NOT NULL DEFAULT 1,
+      created_by INTEGER NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (equipment_id) REFERENCES equipment(id),
+      FOREIGN KEY (created_by) REFERENCES users(id)
+    )
+  `;
+
   await exec(createUsersTable);
   await exec(createEquipmentTable);
   await exec(createBorrowRequestsTable);
   await exec(createAuditLogsTable);
   await exec(createMaintenanceRecordsTable);
+  await exec(createAuditViewsTable);
 
   const userCount = await get('SELECT COUNT(*) as count FROM users');
   if (userCount.count === 0) {
@@ -323,7 +343,111 @@ function getSourceType(eventType) {
   return EVENT_TYPE_MAP[eventType]?.source_type || 'unknown';
 }
 
-async function getTimelineEvents(equipmentId = null, startDate = null, endDate = null) {
+async function createAuditView(viewData, userId) {
+  const { name, description, equipment_id, start_date, end_date, event_types, export_format } = viewData;
+  const eventTypesStr = event_types && event_types.length > 0 ? JSON.stringify(event_types) : null;
+
+  const result = await run(
+    `INSERT INTO audit_views (name, description, equipment_id, start_date, end_date, event_types, export_format, created_by)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    [name, description || null, equipment_id || null, start_date || null, end_date || null, eventTypesStr, export_format, userId]
+  );
+
+  return getAuditViewById(result.lastID);
+}
+
+async function getAuditViewById(id) {
+  const view = await get('SELECT * FROM audit_views WHERE id = ?', [id]);
+  if (view && view.event_types) {
+    try {
+      view.event_types = JSON.parse(view.event_types);
+    } catch (e) {
+      view.event_types = [];
+    }
+  }
+  return view;
+}
+
+async function getAuditViewByName(name) {
+  const view = await get('SELECT * FROM audit_views WHERE name = ?', [name]);
+  if (view && view.event_types) {
+    try {
+      view.event_types = JSON.parse(view.event_types);
+    } catch (e) {
+      view.event_types = [];
+    }
+  }
+  return view;
+}
+
+async function getAllAuditViews() {
+  const views = await all('SELECT * FROM audit_views ORDER BY created_at DESC');
+  return views.map(view => {
+    if (view.event_types) {
+      try {
+        view.event_types = JSON.parse(view.event_types);
+      } catch (e) {
+        view.event_types = [];
+      }
+    }
+    return view;
+  });
+}
+
+async function updateAuditView(id, updates) {
+  const view = await getAuditViewById(id);
+  if (!view) return null;
+
+  const setClauses = [];
+  const params = [];
+
+  if (updates.name !== undefined) {
+    setClauses.push('name = ?');
+    params.push(updates.name);
+  }
+  if (updates.description !== undefined) {
+    setClauses.push('description = ?');
+    params.push(updates.description || null);
+  }
+  if (updates.equipment_id !== undefined) {
+    setClauses.push('equipment_id = ?');
+    params.push(updates.equipment_id || null);
+  }
+  if (updates.start_date !== undefined) {
+    setClauses.push('start_date = ?');
+    params.push(updates.start_date || null);
+  }
+  if (updates.end_date !== undefined) {
+    setClauses.push('end_date = ?');
+    params.push(updates.end_date || null);
+  }
+  if (updates.event_types !== undefined) {
+    setClauses.push('event_types = ?');
+    params.push(updates.event_types && updates.event_types.length > 0 ? JSON.stringify(updates.event_types) : null);
+  }
+  if (updates.export_format !== undefined) {
+    setClauses.push('export_format = ?');
+    params.push(updates.export_format);
+  }
+
+  setClauses.push('version = version + 1');
+  setClauses.push('updated_at = CURRENT_TIMESTAMP');
+  params.push(id);
+
+  await run(
+    `UPDATE audit_views SET ${setClauses.join(', ')} WHERE id = ?`,
+    params
+  );
+
+  return getAuditViewById(id);
+}
+
+async function deleteAuditView(id) {
+  const result = await run('DELETE FROM audit_views WHERE id = ?', [id]);
+  return result.changes > 0;
+}
+
+async function getTimelineEvents(equipmentId = null, startDate = null, endDate = null, eventTypes = null) {
   const events = [];
   const params = [];
   let whereSql = 'WHERE 1=1';
@@ -840,13 +964,18 @@ async function getTimelineEvents(equipmentId = null, startDate = null, endDate =
     });
   });
 
-  events.sort((a, b) => {
+  let filteredEvents = events;
+  if (eventTypes && eventTypes.length > 0) {
+    filteredEvents = events.filter(e => eventTypes.includes(e.event_type));
+  }
+
+  filteredEvents.sort((a, b) => {
     const timeDiff = new Date(a.event_time) - new Date(b.event_time);
     if (timeDiff !== 0) return timeDiff;
     return a.event_id.localeCompare(b.event_id);
   });
 
-  return events;
+  return filteredEvents;
 }
 
 module.exports = {
@@ -865,5 +994,11 @@ module.exports = {
   getTimelineEvents,
   getEventText,
   getSourceType,
-  EVENT_TYPE_MAP
+  EVENT_TYPE_MAP,
+  createAuditView,
+  getAuditViewById,
+  getAuditViewByName,
+  getAllAuditViews,
+  updateAuditView,
+  deleteAuditView
 };

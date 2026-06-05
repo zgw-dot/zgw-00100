@@ -1,4 +1,4 @@
-const { get } = require('../database');
+const { get, logAction } = require('../database');
 
 async function authenticate(req, res, next) {
   const userId = req.headers['x-user-id'];
@@ -20,6 +20,20 @@ async function authenticate(req, res, next) {
 
 function requireAdmin(req, res, next) {
   if (!req.user || req.user.role !== 'admin') {
+    logAction(
+      req.user?.id || null,
+      'UNAUTHORIZED_ACCESS_ATTEMPT',
+      'audit_view',
+      null,
+      {
+        path: req.path,
+        method: req.method,
+        attempted_action: '管理员权限操作',
+        user_role: req.user?.role || 'unknown'
+      },
+      req.ip
+    ).catch(err => console.error('记录审计日志失败:', err));
+
     return res.status(403).json({ error: '需要管理员权限', code: 'ADMIN_REQUIRED' });
   }
   next();
