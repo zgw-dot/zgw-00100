@@ -260,6 +260,89 @@ document.getElementById('addEquipmentBtn').addEventListener('click', () => {
   });
 });
 
+async function checkAvailability(equipmentId, startDate, endDate) {
+  if (!equipmentId || !startDate || !endDate) {
+    return { available: null, message: '请填写完整的设备和时间信息' };
+  }
+
+  try {
+    const data = {
+      equipment_id: equipmentId,
+      start_date: startDate.replace('T', ' ') + ':00',
+      end_date: endDate.replace('T', ' ') + ':00'
+    };
+
+    const response = await fetch(`${API_BASE}/borrow/check-availability`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-user-id': currentUserId
+      },
+      body: JSON.stringify(data)
+    });
+
+    const result = await response.json();
+    return result;
+  } catch (err) {
+    console.error('Availability check failed:', err);
+    return { available: null, message: '可用性检查失败，请稍后重试' };
+  }
+}
+
+function updateAvailabilityDisplay(result) {
+  const availabilityDiv = document.getElementById('availabilityStatus');
+  if (!availabilityDiv) return;
+
+  if (result.available === true) {
+    availabilityDiv.innerHTML = `
+      <div style="padding: 0.75rem; background: #d1fae5; border: 1px solid #10b981; border-radius: 8px; color: #065f46;">
+        <strong>✅ 该时间段可用</strong>
+        <p style="margin: 0.25rem 0 0 0; font-size: 0.85rem;">${result.message || '可以提交申请'}</p>
+      </div>
+    `;
+    document.getElementById('submitBorrowBtn').disabled = false;
+  } else if (result.available === false) {
+    let conflictDetails = '';
+    if (result.details && result.details.conflicts) {
+      conflictDetails = result.details.conflicts.map(c => {
+        const typeText = c.type === 'borrow' ? '借用申请' : '维修记录';
+        const noText = c.request_no || c.maintenance_no || '';
+        const statusText = c.status === 'pending' ? '待审批' :
+                          c.status === 'approved' ? '已批准' :
+                          c.status === 'collected' ? '已领用' :
+                          c.status === 'in_progress' ? '维修中' : c.status;
+        return `
+          <div style="margin-top: 0.5rem; padding: 0.5rem; background: rgba(0,0,0,0.05); border-radius: 4px;">
+            <p style="margin: 0; font-size: 0.85rem;">
+              <strong>${typeText}</strong>: ${noText} (${statusText})
+            </p>
+            <p style="margin: 0.25rem 0 0 0; font-size: 0.8rem; color: #991b1b;">
+              重叠时间: ${c.overlap_start} ~ ${c.overlap_end}
+            </p>
+            ${c.applicant_name ? `<p style="margin: 0.25rem 0 0 0; font-size: 0.8rem;">申请人: ${c.applicant_name}</p>` : ''}
+          </div>
+        `;
+      }).join('');
+    }
+    availabilityDiv.innerHTML = `
+      <div style="padding: 0.75rem; background: #fee2e2; border: 1px solid #ef4444; border-radius: 8px; color: #991b1b;">
+        <strong>❌ 该时间段不可用</strong>
+        <p style="margin: 0.25rem 0 0 0; font-size: 0.85rem;">${result.error || '与现有记录存在冲突'}</p>
+        ${conflictDetails}
+      </div>
+    `;
+    document.getElementById('submitBorrowBtn').disabled = true;
+  } else {
+    availabilityDiv.innerHTML = `
+      <div style="padding: 0.75rem; background: #fef3c7; border: 1px solid #f59e0b; border-radius: 8px; color: #92400e;">
+        <strong>⏳ 正在检查可用性...</strong>
+        <p style="margin: 0.25rem 0 0 0; font-size: 0.85rem;">${result.message || '请稍候'}</p>
+      </div>
+    `;
+    document.getElementById('submitBorrowBtn').disabled = true;
+  }
+}
+
 async function openBorrowModal(equipmentId) {
   const equipment = allEquipment.find(e => e.id === equipmentId);
   if (!equipment) return;
@@ -281,28 +364,82 @@ async function openBorrowModal(equipmentId) {
       <div class="form-row">
         <div class="form-group">
           <label>开始时间 *</label>
-          <input type="datetime-local" name="start_date" required value="${today}">
+          <input type="datetime-local" name="start_date" id="availabilityStartDate" required value="${today}">
         </div>
         <div class="form-group">
           <label>结束时间 *</label>
-          <input type="datetime-local" name="end_date" required value="${tomorrow}">
+          <input type="datetime-local" name="end_date" id="availabilityEndDate" required value="${tomorrow}">
+        </div>
+      </div>
+      <div id="availabilityStatus" style="margin-bottom: 1rem;">
+        <div style="padding: 0.75rem; background: #fef3c7; border: 1px solid #f59e0b; border-radius: 8px; color: #92400e;">
+          <strong>⏳ 正在检查可用性...</strong>
         </div>
       </div>
       <div class="form-actions">
         <button type="button" class="btn btn-secondary" onclick="closeModal()">取消</button>
-        <button type="submit" class="btn btn-primary">提交申请</button>
+        <button type="submit" id="submitBorrowBtn" class="btn btn-primary" disabled>提交申请</button>
       </div>
     </form>
   `);
 
+  let availabilityCheckTimeout;
+
+  async function triggerAvailabilityCheck() {
+    const startInput = document.getElementById('availabilityStartDate');
+    const endInput = document.getElementById('availabilityEndDate');
+    
+    if (!startInput || !endInput) return;
+
+    const startDate = startInput.value;
+    const endDate = endInput.value;
+
+    if (startDate && endDate) {
+      updateAvailabilityDisplay({ available: null, message: '正在检查可用性...' });
+      
+      if (availabilityCheckTimeout) {
+        clearTimeout(availabilityCheckTimeout);
+      }
+      
+      availabilityCheckTimeout = setTimeout(async () => {
+        const result = await checkAvailability(equipmentId, startDate, endDate);
+        updateAvailabilityDisplay(result);
+      }, 300);
+    }
+  }
+
+  const startInput = document.getElementById('availabilityStartDate');
+  const endInput = document.getElementById('availabilityEndDate');
+  
+  if (startInput) {
+    startInput.addEventListener('change', triggerAvailabilityCheck);
+    startInput.addEventListener('input', triggerAvailabilityCheck);
+  }
+  if (endInput) {
+    endInput.addEventListener('change', triggerAvailabilityCheck);
+    endInput.addEventListener('input', triggerAvailabilityCheck);
+  }
+
+  triggerAvailabilityCheck();
+
   document.getElementById('borrowForm').addEventListener('submit', async (e) => {
     e.preventDefault();
     const formData = new FormData(e.target);
+    const startDate = formData.get('start_date');
+    const endDate = formData.get('end_date');
+    
+    const preCheckResult = await checkAvailability(equipmentId, startDate, endDate);
+    if (preCheckResult.available === false) {
+      updateAvailabilityDisplay(preCheckResult);
+      showToast('时间段冲突，无法提交申请', 'error');
+      return;
+    }
+
     const data = {
       equipment_id: parseInt(formData.get('equipment_id')),
       purpose: formData.get('purpose'),
-      start_date: formData.get('start_date').replace('T', ' ') + ':00',
-      end_date: formData.get('end_date').replace('T', ' ') + ':00'
+      start_date: startDate.replace('T', ' ') + ':00',
+      end_date: endDate.replace('T', ' ') + ':00'
     };
 
     try {
@@ -313,6 +450,7 @@ async function openBorrowModal(equipmentId) {
       showToast('借用申请提交成功');
       closeModal();
       await loadBorrowRequests();
+      await loadEquipment();
     } catch (err) {
       console.error('Failed to submit borrow request:', err);
     }
@@ -487,7 +625,7 @@ document.getElementById('applyBorrowBtn').addEventListener('click', () => {
     <form id="borrowForm">
       <div class="form-group">
         <label>选择设备 *</label>
-        <select name="equipment_id" required>
+        <select name="equipment_id" id="availabilityEquipmentSelect" required>
           <option value="">请选择可用设备</option>
           ${availableEquipment.map(e => `<option value="${e.id}">${e.name} (${e.device_code})</option>`).join('')}
         </select>
@@ -499,28 +637,156 @@ document.getElementById('applyBorrowBtn').addEventListener('click', () => {
       <div class="form-row">
         <div class="form-group">
           <label>开始时间 *</label>
-          <input type="datetime-local" name="start_date" required value="${today}">
+          <input type="datetime-local" name="start_date" id="availabilityStartDate2" required value="${today}">
         </div>
         <div class="form-group">
           <label>结束时间 *</label>
-          <input type="datetime-local" name="end_date" required value="${tomorrow}">
+          <input type="datetime-local" name="end_date" id="availabilityEndDate2" required value="${tomorrow}">
+        </div>
+      </div>
+      <div id="availabilityStatus2" style="margin-bottom: 1rem;">
+        <div style="padding: 0.75rem; background: #e5e7eb; border: 1px solid #9ca3af; border-radius: 8px; color: #4b5563;">
+          <strong>ℹ️ 请选择设备和时间以检查可用性</strong>
         </div>
       </div>
       <div class="form-actions">
         <button type="button" class="btn btn-secondary" onclick="closeModal()">取消</button>
-        <button type="submit" class="btn btn-primary">提交申请</button>
+        <button type="submit" id="submitBorrowBtn2" class="btn btn-primary" disabled>提交申请</button>
       </div>
     </form>
   `);
 
+  let availabilityCheckTimeout;
+
+  async function triggerAvailabilityCheck2() {
+    const equipmentSelect = document.getElementById('availabilityEquipmentSelect');
+    const startInput = document.getElementById('availabilityStartDate2');
+    const endInput = document.getElementById('availabilityEndDate2');
+    const availabilityDiv = document.getElementById('availabilityStatus2');
+    const submitBtn = document.getElementById('submitBorrowBtn2');
+    
+    if (!equipmentSelect || !startInput || !endInput) return;
+
+    const equipmentId = equipmentSelect.value;
+    const startDate = startInput.value;
+    const endDate = endInput.value;
+
+    if (!equipmentId || !startDate || !endDate) {
+      availabilityDiv.innerHTML = `
+        <div style="padding: 0.75rem; background: #e5e7eb; border: 1px solid #9ca3af; border-radius: 8px; color: #4b5563;">
+          <strong>ℹ️ 请选择设备和时间以检查可用性</strong>
+        </div>
+      `;
+      submitBtn.disabled = true;
+      return;
+    }
+
+    updateAvailabilityDisplay({ ...{ available: null, message: '正在检查可用性...' }, _target: 'availabilityStatus2', _submitBtn: 'submitBorrowBtn2' });
+    
+    if (availabilityCheckTimeout) {
+      clearTimeout(availabilityCheckTimeout);
+    }
+    
+    availabilityCheckTimeout = setTimeout(async () => {
+      const result = await checkAvailability(parseInt(equipmentId), startDate, endDate);
+      updateAvailabilityDisplay({ ...result, _target: 'availabilityStatus2', _submitBtn: 'submitBorrowBtn2' });
+    }, 300);
+  }
+
+  const originalUpdateDisplay = updateAvailabilityDisplay;
+  window.updateAvailabilityDisplay = function(result) {
+    const targetId = result._target || 'availabilityStatus';
+    const submitBtnId = result._submitBtn || 'submitBorrowBtn';
+    const availabilityDiv = document.getElementById(targetId);
+    const submitBtn = document.getElementById(submitBtnId);
+    
+    if (!availabilityDiv) return;
+
+    if (result.available === true) {
+      availabilityDiv.innerHTML = `
+        <div style="padding: 0.75rem; background: #d1fae5; border: 1px solid #10b981; border-radius: 8px; color: #065f46;">
+          <strong>✅ 该时间段可用</strong>
+          <p style="margin: 0.25rem 0 0 0; font-size: 0.85rem;">${result.message || '可以提交申请'}</p>
+        </div>
+      `;
+      if (submitBtn) submitBtn.disabled = false;
+    } else if (result.available === false) {
+      let conflictDetails = '';
+      if (result.details && result.details.conflicts) {
+        conflictDetails = result.details.conflicts.map(c => {
+          const typeText = c.type === 'borrow' ? '借用申请' : '维修记录';
+          const noText = c.request_no || c.maintenance_no || '';
+          const statusText = c.status === 'pending' ? '待审批' :
+                            c.status === 'approved' ? '已批准' :
+                            c.status === 'collected' ? '已领用' :
+                            c.status === 'in_progress' ? '维修中' : c.status;
+          return `
+            <div style="margin-top: 0.5rem; padding: 0.5rem; background: rgba(0,0,0,0.05); border-radius: 4px;">
+              <p style="margin: 0; font-size: 0.85rem;">
+                <strong>${typeText}</strong>: ${noText} (${statusText})
+              </p>
+              <p style="margin: 0.25rem 0 0 0; font-size: 0.8rem; color: #991b1b;">
+                重叠时间: ${c.overlap_start} ~ ${c.overlap_end}
+              </p>
+              ${c.applicant_name ? `<p style="margin: 0.25rem 0 0 0; font-size: 0.8rem;">申请人: ${c.applicant_name}</p>` : ''}
+            </div>
+          `;
+        }).join('');
+      }
+      availabilityDiv.innerHTML = `
+        <div style="padding: 0.75rem; background: #fee2e2; border: 1px solid #ef4444; border-radius: 8px; color: #991b1b;">
+          <strong>❌ 该时间段不可用</strong>
+          <p style="margin: 0.25rem 0 0 0; font-size: 0.85rem;">${result.error || '与现有记录存在冲突'}</p>
+          ${conflictDetails}
+        </div>
+      `;
+      if (submitBtn) submitBtn.disabled = true;
+    } else {
+      availabilityDiv.innerHTML = `
+        <div style="padding: 0.75rem; background: #fef3c7; border: 1px solid #f59e0b; border-radius: 8px; color: #92400e;">
+          <strong>⏳ 正在检查可用性...</strong>
+          <p style="margin: 0.25rem 0 0 0; font-size: 0.85rem;">${result.message || '请稍候'}</p>
+        </div>
+      `;
+      if (submitBtn) submitBtn.disabled = true;
+    }
+  };
+
+  const equipmentSelect = document.getElementById('availabilityEquipmentSelect');
+  const startInput = document.getElementById('availabilityStartDate2');
+  const endInput = document.getElementById('availabilityEndDate2');
+  
+  if (equipmentSelect) {
+    equipmentSelect.addEventListener('change', triggerAvailabilityCheck2);
+  }
+  if (startInput) {
+    startInput.addEventListener('change', triggerAvailabilityCheck2);
+    startInput.addEventListener('input', triggerAvailabilityCheck2);
+  }
+  if (endInput) {
+    endInput.addEventListener('change', triggerAvailabilityCheck2);
+    endInput.addEventListener('input', triggerAvailabilityCheck2);
+  }
+
   document.getElementById('borrowForm').addEventListener('submit', async (e) => {
     e.preventDefault();
     const formData = new FormData(e.target);
+    const equipmentId = parseInt(formData.get('equipment_id'));
+    const startDate = formData.get('start_date');
+    const endDate = formData.get('end_date');
+    
+    const preCheckResult = await checkAvailability(equipmentId, startDate, endDate);
+    if (preCheckResult.available === false) {
+      updateAvailabilityDisplay({ ...preCheckResult, _target: 'availabilityStatus2', _submitBtn: 'submitBorrowBtn2' });
+      showToast('时间段冲突，无法提交申请', 'error');
+      return;
+    }
+
     const data = {
-      equipment_id: parseInt(formData.get('equipment_id')),
+      equipment_id: equipmentId,
       purpose: formData.get('purpose'),
-      start_date: formData.get('start_date').replace('T', ' ') + ':00',
-      end_date: formData.get('end_date').replace('T', ' ') + ':00'
+      start_date: startDate.replace('T', ' ') + ':00',
+      end_date: endDate.replace('T', ' ') + ':00'
     };
 
     try {

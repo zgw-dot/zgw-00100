@@ -7,6 +7,7 @@
 ### 核心功能
 - **📦 设备台账**：设备的增删改查、冻结/解冻、状态管理
 - **📋 借用申请**：普通用户提交借用申请，选择设备和时间
+- **⏰ 预约可用性**：实时检查时间段冲突，前端可用/不可用提示
 - **✅ 管理员审批**：管理员批准或拒绝借用申请
 - **📥 领用**：申请人或管理员确认领用设备
 - **📤 归还验收**：归还时填写验收结果和损坏备注
@@ -58,6 +59,15 @@ npm run reset
 
 # 重新加载示例数据
 npm run reset && npm run seed
+
+# 运行预约可用性测试脚本
+npm run test-availability
+
+# 运行重启持久化验证脚本
+npm run test-restart
+
+# 运行所有测试
+npm run test-all
 ```
 
 ## 📁 项目结构
@@ -260,6 +270,190 @@ fetch('/api/borrow/1/return', {
 - 自审校验：[borrow.js](file:///d:/workSpace/AI__SPACE/02-label/zgw-00100/routes/borrow.js#L221-L227)
 - 重复归还校验：[borrow.js](file:///d:/workSpace/AI__SPACE/02-label/zgw-00100/routes/borrow.js#L386-L393)
 
+## ⏰ 预约可用性（时间段冲突检测）
+
+### 功能说明
+
+用户在提交借用申请时，系统会自动检测同一设备在请求时间段内是否存在冲突：
+
+**冲突状态包括：**
+- **借用申请**：`pending`（待审批）、`approved`（已批准）、`collected`（已领用）
+- **维修记录**：`in_progress`（维修中）
+
+**时间段释放条件：**
+- 借用申请被 `cancel`（取消）或 `reject`（拒绝）时释放
+- 借用设备 `return`（归还）时释放
+- 维修 `complete`（完成）时释放
+
+**权限控制：**
+- **管理员**：可以看到冲突的完整信息（申请人姓名、ID等）
+- **普通用户**：只能看到冲突单号和时间，申请人信息显示为"其他用户"
+
+### 冲突检测算法
+
+使用标准的时间段重叠检测：
+```
+A.start < B.end AND A.end > B.start
+```
+
+### 新增接口
+
+#### 1. 检查时间段可用性
+
+**POST** `/api/borrow/check-availability`
+
+**请求参数：**
+```json
+{
+  "equipment_id": 1,
+  "start_date": "2026-06-10 09:00:00",
+  "end_date": "2026-06-12 18:00:00"
+}
+```
+
+**响应 - 可用（HTTP 200）：**
+```json
+{
+  "available": true,
+  "requested_start": "2026-06-10 09:00:00",
+  "requested_end": "2026-06-12 18:00:00"
+}
+```
+
+**响应 - 冲突（HTTP 409）：**
+```json
+{
+  "error": "该时间段与现有记录存在冲突",
+  "code": "TIME_SLOT_CONFLICT",
+  "details": {
+    "conflicts": [
+      {
+        "type": "borrow",
+        "request_no": "BR202606050001",
+        "overlap_start": "2026-06-10 09:00:00",
+        "overlap_end": "2026-06-12 18:00:00",
+        "start_date": "2026-06-08 09:00:00",
+        "end_date": "2026-06-15 18:00:00",
+        "status": "approved",
+        "applicant_name": "张三",
+        "applicant_id": 2
+      },
+      {
+        "type": "maintenance",
+        "maintenance_no": "MR000001",
+        "overlap_start": "2026-06-10 09:00:00",
+        "overlap_end": "2026-06-12 18:00:00",
+        "start_date": "2026-06-11 09:00:00",
+        "end_date": "2026-06-20 18:00:00",
+        "status": "in_progress"
+      }
+    ],
+    "requested_start": "2026-06-10 09:00:00",
+    "requested_end": "2026-06-12 18:00:00"
+  }
+}
+```
+
+### 前端功能
+
+在借用申请模态框中：
+- 选择设备和起止时间后，自动检查可用性（300ms 防抖）
+- 显示三种状态：✅ 可用、❌ 不可用、⏳ 检查中
+- 提交前做最终检查，防止并发冲突
+- 冲突时显示详细的冲突信息
+
+### 审计日志
+
+所有可用性相关操作都会记录到审计日志：
+- `CHECK_AVAILABILITY`：检查时间段可用性
+- `BORROW_REQUEST_AVAILABILITY_PASSED`：可用性检查通过
+- `BORROW_REQUEST_BLOCKED_BY_CONFLICT`：申请因冲突被拦截
+- `MAINTENANCE_AVAILABILITY_PASSED`：维修开始前检查通过
+- `MAINTENANCE_BLOCKED_BY_CONFLICT`：维修因冲突被拦截
+
+---
+
+### 🔴 验证链路 4：时间段冲突检测
+
+**场景 A：无冲突申请**
+
+**复现步骤：**
+1. 以普通用户身份登录（ID=2）
+2. 点击「+ 申请借用」
+3. 选择一个可用设备
+4. 选择未来一个没有占用的时间段
+5. 观察可用性状态
+
+**预期结果：**
+- 前端显示 ✅ 时间段可用
+- 提交申请成功，返回 HTTP 201
+
+---
+
+**场景 B：时间重叠冲突**
+
+**复现步骤：**
+1. 先创建一个借用申请（时间段：2026-06-10 ~ 2026-06-15）
+2. 另一个用户尝试借用同一设备，时间段：2026-06-12 ~ 2026-06-18
+
+**预期结果：**
+- 前端显示 ❌ 时间段不可用
+- 提交时返回 HTTP 409
+- 错误码：`TIME_SLOT_CONFLICT`
+- 包含冲突单号、重叠时间等详细信息
+
+---
+
+**场景 C：边界相邻不冲突**
+
+**复现步骤：**
+1. 创建借用申请 A：2026-06-10 09:00 ~ 2026-06-15 18:00
+2. 创建借用申请 B：2026-06-15 18:00 ~ 2026-06-20 18:00
+
+**预期结果：**
+- 两个时间段边界相邻（A.end == B.start）
+- 不视为冲突，申请 B 可以成功创建
+
+---
+
+**场景 D：维修窗口冲突**
+
+**复现步骤：**
+1. 管理员将设备标记为维修中（时间段：2026-06-10 ~ 2026-06-20）
+2. 用户尝试借用该设备，时间段：2026-06-15 ~ 2026-06-18
+
+**预期结果：**
+- 返回 HTTP 409，错误码 `TIME_SLOT_CONFLICT`
+- 冲突类型显示为 `maintenance`
+
+---
+
+**场景 E：服务重启后冲突规则仍然生效**
+
+**复现步骤：**
+1. 创建一个借用申请占用某个时间段
+2. 重启服务（Ctrl+C 停止，然后 `npm start`）
+3. 尝试在同一时间段创建另一个申请
+
+**预期结果：**
+- 重启后仍然检测到冲突
+- 数据持久化正常，规则生效
+
+---
+
+**场景 F：权限差异 - 普通用户 vs 管理员**
+
+**复现步骤：**
+1. 用户 A（ID=2）创建一个借用申请
+2. 用户 B（ID=3）尝试在同一时间段借用
+3. 分别以普通用户和管理员身份查看冲突详情
+
+**预期结果：**
+- 普通用户看到申请人为"其他用户"
+- 管理员看到完整的申请人姓名和 ID
+
+---
+
 ## 📦 数据持久化
 
 所有数据使用 SQLite 持久化存储在 `./data/equipment.db` 文件中：
@@ -330,6 +524,7 @@ fetch('/api/borrow/1/return', {
 | GET | `/borrow` | 获取借用申请列表 | 所有用户（仅看自己的） |
 | GET | `/borrow/:id` | 获取申请详情 | 相关人员 |
 | POST | `/borrow` | 提交借用申请 | 所有用户 |
+| POST | `/borrow/check-availability` | 检查时间段可用性 | 所有用户 |
 | POST | `/borrow/:id/approve` | 批准申请 | 管理员 |
 | POST | `/borrow/:id/reject` | 拒绝申请 | 管理员 |
 | POST | `/borrow/:id/collect` | 领用设备 | 申请人/管理员 |
@@ -388,6 +583,7 @@ fetch('/api/borrow/1/return', {
 | `DATE_INVERSION` | 时间倒挂（结束早于开始） |
 | `SELF_APPROVAL_NOT_ALLOWED` | 借用人自审 |
 | `DUPLICATE_RETURN` | 重复归还 |
+| `TIME_SLOT_CONFLICT` | 时间段冲突 |
 | `PENDING_REQUEST_EXISTS` | 存在未完成的借用申请 |
 | `ACTIVE_BORROW_EXISTS` | 设备有活跃借用 |
 | `INVALID_STATUS_FOR_APPROVAL` | 状态不允许审批 |

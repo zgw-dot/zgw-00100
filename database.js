@@ -1,6 +1,7 @@
 const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
 const fs = require('fs');
+const moment = require('moment');
 
 const dbDir = path.join(__dirname, 'data');
 if (!fs.existsSync(dbDir)) {
@@ -165,6 +166,128 @@ async function transaction(callback) {
   }
 }
 
+function isTimeOverlap(s1, e1, s2, e2) {
+  const start1 = moment(s1);
+  const end1 = moment(e1);
+  const start2 = moment(s2);
+  const end2 = moment(e2);
+  return start1.isBefore(end2) && start2.isBefore(end1);
+}
+
+function getOverlapPeriod(s1, e1, s2, e2) {
+  const start1 = moment(s1);
+  const end1 = moment(e1);
+  const start2 = moment(s2);
+  const end2 = moment(e2);
+  
+  const overlapStart = start1.isAfter(start2) ? start1 : start2;
+  const overlapEnd = end1.isBefore(end2) ? end1 : end2;
+  
+  return {
+    overlap_start: overlapStart.format('YYYY-MM-DD HH:mm:ss'),
+    overlap_end: overlapEnd.format('YYYY-MM-DD HH:mm:ss')
+  };
+}
+
+async function checkTimeSlotConflicts(equipmentId, startDate, endDate, excludeRequestId = null) {
+  const borrowConflicts = await all(`
+    SELECT 
+      br.id,
+      br.request_no,
+      br.equipment_id,
+      br.applicant_id,
+      br.status,
+      br.start_date,
+      br.end_date,
+      u.name as applicant_name
+    FROM borrow_requests br
+    LEFT JOIN users u ON br.applicant_id = u.id
+    WHERE br.equipment_id = ?
+      AND br.status IN ('pending', 'approved', 'collected')
+      ${excludeRequestId ? 'AND br.id != ?' : ''}
+  `, excludeRequestId ? [equipmentId, excludeRequestId] : [equipmentId]);
+
+  const maintenanceConflicts = await all(`
+    SELECT 
+      mr.id,
+      mr.equipment_id,
+      mr.reporter_id,
+      mr.status,
+      mr.started_at as start_date,
+      COALESCE(mr.estimated_completion_date, mr.completed_at, datetime('now', '+7 days')) as end_date,
+      u.name as reporter_name
+    FROM maintenance_records mr
+    LEFT JOIN users u ON mr.reporter_id = u.id
+    WHERE mr.equipment_id = ?
+      AND mr.status IN ('pending', 'in_progress')
+  `, [equipmentId]);
+
+  const conflicts = [];
+
+  for (const br of borrowConflicts) {
+    if (isTimeOverlap(startDate, endDate, br.start_date, br.end_date)) {
+      const overlap = getOverlapPeriod(startDate, endDate, br.start_date, br.end_date);
+      conflicts.push({
+        type: 'borrow',
+        request_id: br.id,
+        request_no: br.request_no,
+        status: br.status,
+        applicant_id: br.applicant_id,
+        applicant_name: br.applicant_name,
+        start_date: br.start_date,
+        end_date: br.end_date,
+        ...overlap
+      });
+    }
+  }
+
+  for (const mr of maintenanceConflicts) {
+    if (isTimeOverlap(startDate, endDate, mr.start_date, mr.end_date)) {
+      const overlap = getOverlapPeriod(startDate, endDate, mr.start_date, mr.end_date);
+      conflicts.push({
+        type: 'maintenance',
+        maintenance_id: mr.id,
+        maintenance_no: `MR${String(mr.id).padStart(6, '0')}`,
+        status: mr.status,
+        reporter_id: mr.reporter_id,
+        reporter_name: mr.reporter_name,
+        start_date: mr.start_date,
+        end_date: mr.end_date,
+        ...overlap
+      });
+    }
+  }
+
+  return conflicts;
+}
+
+function filterConflictsByPermission(conflicts, user) {
+  if (user.role === 'admin') {
+    return conflicts;
+  }
+  
+  return conflicts.map(conflict => {
+    if (conflict.type === 'borrow') {
+      if (conflict.applicant_id === user.id) {
+        return conflict;
+      }
+      return {
+        type: conflict.type,
+        request_no: conflict.request_no,
+        status: conflict.status,
+        start_date: conflict.start_date,
+        end_date: conflict.end_date,
+        overlap_start: conflict.overlap_start,
+        overlap_end: conflict.overlap_end,
+        applicant_name: '其他用户',
+        applicant_id: null
+      };
+    } else {
+      return conflict;
+    }
+  });
+}
+
 module.exports = {
   db,
   run,
@@ -173,5 +296,9 @@ module.exports = {
   exec,
   initDatabase,
   logAction,
-  transaction
+  transaction,
+  checkTimeSlotConflicts,
+  filterConflictsByPermission,
+  isTimeOverlap,
+  getOverlapPeriod
 };

@@ -1,7 +1,8 @@
 const express = require('express');
 const router = express.Router();
-const { run, get, all, logAction, transaction } = require('../database');
+const { run, get, all, logAction, transaction, checkTimeSlotConflicts, filterConflictsByPermission } = require('../database');
 const { authenticate, requireAdmin } = require('../middleware/auth');
+const moment = require('moment');
 
 function getStatusText(status) {
   const map = {
@@ -122,6 +123,63 @@ router.post('/:id/start', authenticate, requireAdmin, async (req, res) => {
     });
   }
 
+  const maintenanceStart = moment().format('YYYY-MM-DD HH:mm:ss');
+  const maintenanceEnd = estimated_completion_date || moment().add(7, 'days').format('YYYY-MM-DD HH:mm:ss');
+
+  const conflicts = await checkTimeSlotConflicts(record.equipment_id, maintenanceStart, maintenanceEnd);
+
+  if (conflicts.length > 0) {
+    const filteredConflicts = filterConflictsByPermission(conflicts, req.user);
+
+    await logAction(
+      req.user.id,
+      'MAINTENANCE_BLOCKED_BY_CONFLICT',
+      'maintenance_record',
+      id,
+      {
+        equipment_id: record.equipment_id,
+        start_date: maintenanceStart,
+        end_date: maintenanceEnd,
+        conflict_count: conflicts.length,
+        conflicts: conflicts.map(c => ({
+          type: c.type,
+          request_no: c.request_no || c.maintenance_no,
+          overlap_start: c.overlap_start,
+          overlap_end: c.overlap_end
+        }))
+      },
+      req.ip
+    );
+
+    return res.status(409).json({
+      error: '维修时间段与现有借用申请存在冲突',
+      code: 'TIME_SLOT_CONFLICT',
+      details: {
+        conflicts: filteredConflicts,
+        requested_start: maintenanceStart,
+        requested_end: maintenanceEnd,
+        equipment: {
+          id: equipment.id,
+          name: equipment.name,
+          device_code: equipment.device_code
+        }
+      }
+    });
+  }
+
+  await logAction(
+    req.user.id,
+    'MAINTENANCE_AVAILABILITY_PASSED',
+    'maintenance_record',
+    id,
+    {
+      equipment_id: record.equipment_id,
+      start_date: maintenanceStart,
+      end_date: maintenanceEnd
+    },
+    req.ip
+  );
+
   try {
     await transaction(async () => {
       await run(`
@@ -129,9 +187,9 @@ router.post('/:id/start', authenticate, requireAdmin, async (req, res) => {
         SET status = 'in_progress',
             technician_id = ?,
             estimated_completion_date = ?,
-            started_at = CURRENT_TIMESTAMP
+            started_at = ?
         WHERE id = ?
-      `, [technician_id || null, estimated_completion_date || null, id]);
+      `, [technician_id || null, estimated_completion_date || null, maintenanceStart, id]);
 
       await run("UPDATE equipment SET status = 'maintenance', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
         [record.equipment_id]);

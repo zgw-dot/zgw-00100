@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { run, get, all, logAction, transaction } = require('../database');
+const { run, get, all, logAction, transaction, checkTimeSlotConflicts, filterConflictsByPermission } = require('../database');
 const { authenticate, requireAdmin } = require('../middleware/auth');
 const moment = require('moment');
 
@@ -30,6 +30,91 @@ function enhanceRequest(req) {
   req.status_text = getStatusText(req.status);
   return req;
 }
+
+router.post('/check-availability', authenticate, async (req, res) => {
+  const { equipment_id, start_date, end_date } = req.body;
+
+  if (!equipment_id || !start_date || !end_date) {
+    return res.status(400).json({
+      error: '设备ID、开始时间和结束时间为必填项',
+      code: 'MISSING_REQUIRED_FIELDS'
+    });
+  }
+
+  const start = moment(start_date);
+  const end = moment(end_date);
+
+  if (!start.isValid() || !end.isValid()) {
+    return res.status(400).json({
+      error: '日期格式无效，请使用 YYYY-MM-DD HH:mm:ss 格式',
+      code: 'INVALID_DATE_FORMAT'
+    });
+  }
+
+  if (end.isBefore(start)) {
+    return res.status(400).json({
+      error: '结束时间不能早于开始时间（时间倒挂）',
+      code: 'DATE_INVERSION',
+      details: { start_date, end_date }
+    });
+  }
+
+  const equipment = await get('SELECT * FROM equipment WHERE id = ?', [equipment_id]);
+  if (!equipment) {
+    return res.status(404).json({ error: '设备不存在', code: 'EQUIPMENT_NOT_FOUND' });
+  }
+
+  const conflicts = await checkTimeSlotConflicts(equipment_id, start_date, end_date);
+  const filteredConflicts = filterConflictsByPermission(conflicts, req.user);
+
+  await logAction(
+    req.user.id,
+    'CHECK_AVAILABILITY',
+    'equipment',
+    equipment_id,
+    {
+      equipment_id,
+      start_date,
+      end_date,
+      conflict_count: conflicts.length,
+      has_conflict: conflicts.length > 0
+    },
+    req.ip
+  );
+
+  if (conflicts.length > 0) {
+    return res.status(409).json({
+      available: false,
+      error: '该时间段与现有记录存在冲突',
+      code: 'TIME_SLOT_CONFLICT',
+      details: {
+        conflicts: filteredConflicts,
+        requested_start: start_date,
+        requested_end: end_date,
+        equipment: {
+          id: equipment.id,
+          name: equipment.name,
+          device_code: equipment.device_code
+        }
+      }
+    });
+  }
+
+  res.json({
+    available: true,
+    message: '该时间段可用',
+    code: 'AVAILABLE',
+    details: {
+      requested_start: start_date,
+      requested_end: end_date,
+      equipment: {
+        id: equipment.id,
+        name: equipment.name,
+        device_code: equipment.device_code
+      }
+    }
+  });
+});
 
 router.get('/', authenticate, async (req, res) => {
   const { status, equipment_id, applicant_id } = req.query;
@@ -149,17 +234,63 @@ router.post('/', authenticate, async (req, res) => {
     });
   }
 
-  const pendingRequest = await get(`
-    SELECT id FROM borrow_requests
-    WHERE equipment_id = ? AND status IN ('pending', 'approved', 'collected')
-  `, [equipment_id]);
+  const formattedStart = start.format('YYYY-MM-DD HH:mm:ss');
+  const formattedEnd = end.format('YYYY-MM-DD HH:mm:ss');
 
-  if (pendingRequest) {
-    return res.status(400).json({
-      error: '该设备已有未完成的借用申请',
-      code: 'PENDING_REQUEST_EXISTS'
+  const conflicts = await checkTimeSlotConflicts(equipment_id, formattedStart, formattedEnd);
+
+  if (conflicts.length > 0) {
+    const filteredConflicts = filterConflictsByPermission(conflicts, req.user);
+
+    await logAction(
+      req.user.id,
+      'BORROW_REQUEST_BLOCKED_BY_CONFLICT',
+      'borrow_request',
+      null,
+      {
+        equipment_id,
+        purpose,
+        start_date: formattedStart,
+        end_date: formattedEnd,
+        conflict_count: conflicts.length,
+        conflicts: conflicts.map(c => ({
+          type: c.type,
+          request_no: c.request_no || c.maintenance_no,
+          overlap_start: c.overlap_start,
+          overlap_end: c.overlap_end
+        }))
+      },
+      req.ip
+    );
+
+    return res.status(409).json({
+      error: '该时间段与现有记录存在冲突',
+      code: 'TIME_SLOT_CONFLICT',
+      details: {
+        conflicts: filteredConflicts,
+        requested_start: formattedStart,
+        requested_end: formattedEnd,
+        equipment: {
+          id: equipment.id,
+          name: equipment.name,
+          device_code: equipment.device_code
+        }
+      }
     });
   }
+
+  await logAction(
+    req.user.id,
+    'BORROW_REQUEST_AVAILABILITY_PASSED',
+    'borrow_request',
+    null,
+    {
+      equipment_id,
+      start_date: formattedStart,
+      end_date: formattedEnd
+    },
+    req.ip
+  );
 
   const requestNo = await generateRequestNo();
 
@@ -171,8 +302,8 @@ router.post('/', authenticate, async (req, res) => {
     equipment_id,
     req.user.id,
     purpose,
-    start.format('YYYY-MM-DD HH:mm:ss'),
-    end.format('YYYY-MM-DD HH:mm:ss')
+    formattedStart,
+    formattedEnd
   ]);
 
   await logAction(
@@ -180,7 +311,7 @@ router.post('/', authenticate, async (req, res) => {
     'CREATE_BORROW_REQUEST',
     'borrow_request',
     result.lastID,
-    { request_no: requestNo, equipment_id, purpose, start_date, end_date },
+    { request_no: requestNo, equipment_id, purpose, start_date: formattedStart, end_date: formattedEnd },
     req.ip
   );
 
