@@ -321,6 +321,8 @@ function filterConflictsByPermission(conflicts, user) {
   });
 }
 
+const VALID_EXPORT_FORMATS = ['json', 'csv'];
+
 const EVENT_TYPE_MAP = {
   borrow_created: { text: '提交借用申请', source_type: 'borrow' },
   borrow_approved: { text: '批准借用申请', source_type: 'borrow' },
@@ -445,6 +447,290 @@ async function updateAuditView(id, updates) {
 async function deleteAuditView(id) {
   const result = await run('DELETE FROM audit_views WHERE id = ?', [id]);
   return result.changes > 0;
+}
+
+const AUDIT_VIEW_PACKAGE_VERSION = 1;
+const MAX_IMPORT_VIEWS = parseInt(process.env.MAX_IMPORT_VIEWS || '20', 10);
+const VALID_VIEW_FIELDS = ['name', 'description', 'equipment_id', 'start_date', 'end_date', 'event_types', 'export_format', 'version', 'created_by', 'created_at', 'updated_at'];
+const REQUIRED_VIEW_FIELDS = ['name', 'export_format', 'equipment_id', 'start_date', 'end_date', 'event_types'];
+const DEFAULT_VIEW_VALUES = {
+  description: null,
+  version: 1
+};
+
+async function exportAuditViews(viewIds = null) {
+  let sql = 'SELECT * FROM audit_views';
+  let params = [];
+
+  if (viewIds && viewIds.length > 0) {
+    const placeholders = viewIds.map(() => '?').join(', ');
+    sql += ` WHERE id IN (${placeholders})`;
+    params = viewIds;
+  }
+
+  sql += ' ORDER BY created_at ASC';
+
+  const views = await all(sql, params);
+  const formattedViews = [];
+
+  for (const view of views) {
+    if (view.event_types) {
+      try {
+        view.event_types = JSON.parse(view.event_types);
+      } catch (e) {
+        view.event_types = [];
+      }
+    }
+    const creator = view.created_by ? await get('SELECT id, username, name FROM users WHERE id = ?', [view.created_by]) : null;
+    formattedViews.push({
+      name: view.name,
+      description: view.description,
+      equipment_id: view.equipment_id,
+      start_date: view.start_date,
+      end_date: view.end_date,
+      event_types: view.event_types,
+      export_format: view.export_format,
+      version: view.version,
+      created_by: view.created_by,
+      created_by_name: creator?.name || null,
+      created_by_username: creator?.username || null,
+      created_at: view.created_at,
+      updated_at: view.updated_at
+    });
+  }
+
+  return {
+    package_version: AUDIT_VIEW_PACKAGE_VERSION,
+    exported_at: new Date().toISOString(),
+    view_count: formattedViews.length,
+    views: formattedViews
+  };
+}
+
+function validateImportView(view, index, validEventTypes) {
+  const errors = [];
+  const warnings = [];
+  const cleaned = {};
+
+  for (const key of Object.keys(view)) {
+    if (VALID_VIEW_FIELDS.includes(key)) {
+      cleaned[key] = view[key];
+    } else {
+      warnings.push(`忽略未知字段 "${key}"`);
+    }
+  }
+
+  for (const field of REQUIRED_VIEW_FIELDS) {
+    if (cleaned[field] === undefined || cleaned[field] === null || cleaned[field] === '') {
+      if (DEFAULT_VIEW_VALUES[field] !== undefined) {
+        cleaned[field] = DEFAULT_VIEW_VALUES[field];
+        warnings.push(`缺少字段 "${field}"，使用默认值: ${DEFAULT_VIEW_VALUES[field]}`);
+      } else {
+        errors.push(`缺少必填字段 "${field}"`);
+      }
+    }
+  }
+
+  if (cleaned.name) {
+    if (typeof cleaned.name !== 'string') {
+      errors.push('名称必须是字符串');
+    } else if (cleaned.name.trim().length === 0) {
+      errors.push('名称不能为空');
+    } else if (cleaned.name.length > 100) {
+      errors.push('名称不能超过100个字符');
+    }
+  }
+
+  if (cleaned.export_format && !VALID_EXPORT_FORMATS.includes(cleaned.export_format)) {
+    errors.push(`导出格式必须是以下之一: ${VALID_EXPORT_FORMATS.join(', ')}`);
+  }
+
+  if (cleaned.equipment_id !== undefined && cleaned.equipment_id !== null) {
+    if (typeof cleaned.equipment_id !== 'number' || cleaned.equipment_id <= 0 || !Number.isInteger(cleaned.equipment_id)) {
+      errors.push('设备ID必须是正整数');
+    }
+  }
+
+  if (cleaned.start_date) {
+    const date = new Date(cleaned.start_date);
+    if (isNaN(date.getTime())) {
+      errors.push('开始日期格式无效');
+    }
+  }
+
+  if (cleaned.end_date) {
+    const date = new Date(cleaned.end_date);
+    if (isNaN(date.getTime())) {
+      errors.push('结束日期格式无效');
+    }
+  }
+
+  if (cleaned.start_date && cleaned.end_date) {
+    const start = new Date(cleaned.start_date);
+    const end = new Date(cleaned.end_date);
+    if (start > end) {
+      errors.push('开始日期不能晚于结束日期');
+    }
+  }
+
+  if (cleaned.event_types !== undefined && cleaned.event_types !== null) {
+    if (!Array.isArray(cleaned.event_types)) {
+      errors.push('事件类型必须是数组');
+    } else if (cleaned.event_types.length === 0) {
+      errors.push('事件类型数组不能为空');
+    } else {
+      for (const et of cleaned.event_types) {
+        if (!validEventTypes.includes(et)) {
+          errors.push(`无效的事件类型: ${et}`);
+        }
+      }
+    }
+  }
+
+  if (cleaned.version !== undefined && cleaned.version !== null) {
+    if (typeof cleaned.version !== 'number' || cleaned.version < 1 || !Number.isInteger(cleaned.version)) {
+      warnings.push('版本号无效，将重置为 1');
+      cleaned.version = 1;
+    }
+  } else {
+    cleaned.version = 1;
+    warnings.push('缺少版本号，使用默认值 1');
+  }
+
+  return { cleaned, errors, warnings };
+}
+
+async function importAuditViews(pkg, userId, mode = 'skip') {
+  const results = {
+    total: 0,
+    imported: 0,
+    skipped: 0,
+    overwritten: 0,
+    failed: 0,
+    details: []
+  };
+
+  if (!pkg || typeof pkg !== 'object') {
+    throw new Error('无效的导入包格式');
+  }
+
+  if (!Array.isArray(pkg.views)) {
+    throw new Error('导入包缺少 views 数组');
+  }
+
+  results.total = pkg.views.length;
+
+  if (results.total > MAX_IMPORT_VIEWS) {
+    throw new Error(`导入数量超过限制，最多允许 ${MAX_IMPORT_VIEWS} 个视图，当前 ${results.total} 个`);
+  }
+
+  if (mode !== 'skip' && mode !== 'overwrite') {
+    throw new Error(`无效的导入模式，必须是 'skip' 或 'overwrite'`);
+  }
+
+  const validEventTypes = Object.keys(EVENT_TYPE_MAP);
+  const now = new Date().toISOString();
+
+  await transaction(async () => {
+    for (let i = 0; i < pkg.views.length; i++) {
+      const view = pkg.views[i];
+      const viewName = view.name || `[第${i + 1}项]`;
+      const detail = {
+        index: i,
+        name: viewName,
+        status: 'pending',
+        action: null,
+        errors: [],
+        warnings: []
+      };
+
+      try {
+        const { cleaned, errors, warnings } = validateImportView(view, i, validEventTypes);
+        detail.errors = errors;
+        detail.warnings = warnings;
+
+        if (errors.length > 0) {
+          detail.status = 'failed';
+          detail.action = 'rejected';
+          results.failed++;
+          results.details.push(detail);
+          continue;
+        }
+
+        const existingView = await getAuditViewByName(cleaned.name);
+
+        if (existingView) {
+          if (mode === 'skip') {
+            detail.status = 'skipped';
+            detail.action = 'skip';
+            detail.warnings.push(`视图名称 "${cleaned.name}" 已存在，已跳过`);
+            results.skipped++;
+            results.details.push(detail);
+            continue;
+          } else if (mode === 'overwrite') {
+            const updateData = {
+              description: cleaned.description,
+              equipment_id: cleaned.equipment_id,
+              start_date: cleaned.start_date,
+              end_date: cleaned.end_date,
+              event_types: cleaned.event_types,
+              export_format: cleaned.export_format
+            };
+            const updatedView = await updateAuditView(existingView.id, updateData);
+            detail.status = 'success';
+            detail.action = 'overwrite';
+            detail.view_id = updatedView.id;
+            detail.old_version = existingView.version;
+            detail.new_version = updatedView.version;
+            results.overwritten++;
+            results.details.push(detail);
+            continue;
+          }
+        }
+
+        const equipment = cleaned.equipment_id ? await get('SELECT * FROM equipment WHERE id = ?', [cleaned.equipment_id]) : null;
+        if (cleaned.equipment_id && !equipment) {
+          detail.status = 'failed';
+          detail.action = 'rejected';
+          detail.errors.push(`设备ID ${cleaned.equipment_id} 不存在`);
+          results.failed++;
+          results.details.push(detail);
+          continue;
+        }
+
+        const newView = await createAuditView({
+          name: cleaned.name,
+          description: cleaned.description,
+          equipment_id: cleaned.equipment_id,
+          start_date: cleaned.start_date,
+          end_date: cleaned.end_date,
+          event_types: cleaned.event_types,
+          export_format: cleaned.export_format
+        }, userId);
+
+        if (cleaned.version > 1) {
+          await run('UPDATE audit_views SET version = ? WHERE id = ?', [cleaned.version, newView.id]);
+          newView.version = cleaned.version;
+        }
+
+        detail.status = 'success';
+        detail.action = 'create';
+        detail.view_id = newView.id;
+        detail.version = newView.version;
+        results.imported++;
+        results.details.push(detail);
+
+      } catch (err) {
+        detail.status = 'failed';
+        detail.action = 'error';
+        detail.errors.push(err.message || '未知错误');
+        results.failed++;
+        results.details.push(detail);
+      }
+    }
+  });
+
+  return results;
 }
 
 async function getTimelineEvents(equipmentId = null, startDate = null, endDate = null, eventTypes = null) {
@@ -995,10 +1281,15 @@ module.exports = {
   getEventText,
   getSourceType,
   EVENT_TYPE_MAP,
+  VALID_EXPORT_FORMATS,
   createAuditView,
   getAuditViewById,
   getAuditViewByName,
   getAllAuditViews,
   updateAuditView,
-  deleteAuditView
+  deleteAuditView,
+  exportAuditViews,
+  importAuditViews,
+  AUDIT_VIEW_PACKAGE_VERSION,
+  MAX_IMPORT_VIEWS
 };

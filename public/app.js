@@ -93,26 +93,6 @@ document.getElementById('userSelector').addEventListener('change', async (e) => 
   }
 });
 
-document.querySelectorAll('.nav-tab').forEach(tab => {
-  tab.addEventListener('click', () => {
-    const tabName = tab.dataset.tab;
-    document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
-    document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
-    tab.classList.add('active');
-    document.getElementById(`${tabName}-tab`).classList.add('active');
-
-    if (tabName === 'history') {
-      loadEquipmentSelectors();
-    }
-    if (tabName === 'audit') {
-      loadEquipmentSelectors();
-      if (currentUser?.role === 'admin') {
-        loadAuditLogs();
-      }
-    }
-  });
-});
-
 async function loadEquipment() {
   try {
     const data = await apiRequest('/equipment');
@@ -1370,6 +1350,520 @@ async function loadAllData() {
   ]);
   loadEquipmentSelectors();
 }
+
+let allAuditViews = [];
+let selectedViewIds = new Set();
+
+function updatePermissions() {
+  const isAdmin = currentUser?.role === 'admin';
+  document.getElementById('addEquipmentBtn').style.display = isAdmin ? 'inline-block' : 'none';
+  document.getElementById('auditLogsSection').style.display = isAdmin ? 'block' : 'none';
+  document.getElementById('auditViewsSection').style.display = isAdmin ? 'block' : 'none';
+}
+
+async function loadAuditViews() {
+  if (!currentUser || currentUser.role !== 'admin') return;
+
+  try {
+    const data = await apiRequest('/audit/views');
+    allAuditViews = data.views || [];
+    renderAuditViewsTable();
+  } catch (err) {
+    console.error('Failed to load audit views:', err);
+  }
+}
+
+function renderAuditViewsTable() {
+  const tbody = document.getElementById('auditViewsTableBody');
+  const isAdmin = currentUser?.role === 'admin';
+
+  if (!isAdmin || allAuditViews.length === 0) {
+    tbody.innerHTML = `
+      <tr>
+        <td colspan="7">
+          <div class="empty-state">
+            <div class="empty-state-icon">📁</div>
+            <p>暂无审计视图</p>
+          </div>
+        </td>
+      </tr>
+    `;
+    updateSelectedCount();
+    return;
+  }
+
+  tbody.innerHTML = allAuditViews.map(view => {
+    const isSelected = selectedViewIds.has(view.id);
+    return `
+      <tr>
+        <td><input type="checkbox" class="view-checkbox" data-id="${view.id}" ${isSelected ? 'checked' : ''}></td>
+        <td><strong>${view.name}</strong></td>
+        <td>${view.description || '-'}</td>
+        <td><span class="status-badge status-${view.export_format}">${view.export_format.toUpperCase()}</span></td>
+        <td>v${view.version}</td>
+        <td style="font-size: 0.8rem;">${view.created_at}</td>
+        <td>
+          <div class="action-buttons">
+            <button class="btn btn-sm btn-primary" onclick="exportViewById(${view.id})">导出</button>
+            <button class="btn btn-sm btn-secondary" onclick="editView(${view.id})">编辑</button>
+            <button class="btn btn-sm btn-danger" onclick="deleteView(${view.id})">删除</button>
+          </div>
+        </td>
+      </tr>
+    `;
+  }).join('');
+
+  document.querySelectorAll('.view-checkbox').forEach(cb => {
+    cb.addEventListener('change', (e) => {
+      const id = parseInt(e.target.dataset.id);
+      if (e.target.checked) {
+        selectedViewIds.add(id);
+      } else {
+        selectedViewIds.delete(id);
+      }
+      updateSelectedCount();
+      updateSelectAllCheckbox();
+    });
+  });
+
+  updateSelectAllCheckbox();
+  updateSelectedCount();
+}
+
+function updateSelectedCount() {
+  document.getElementById('selectedViewsCount').textContent = `已选择: ${selectedViewIds.size} 个`;
+}
+
+function updateSelectAllCheckbox() {
+  const checkbox = document.getElementById('selectAllViewsCheckbox');
+  if (allAuditViews.length === 0) {
+    checkbox.checked = false;
+    checkbox.indeterminate = false;
+  } else if (selectedViewIds.size === allAuditViews.length) {
+    checkbox.checked = true;
+    checkbox.indeterminate = false;
+  } else if (selectedViewIds.size > 0) {
+    checkbox.checked = false;
+    checkbox.indeterminate = true;
+  } else {
+    checkbox.checked = false;
+    checkbox.indeterminate = false;
+  }
+}
+
+function selectAllViews() {
+  allAuditViews.forEach(v => selectedViewIds.add(v.id));
+  renderAuditViewsTable();
+}
+
+function deselectAllViews() {
+  selectedViewIds.clear();
+  renderAuditViewsTable();
+}
+
+async function exportViewsPackage() {
+  if (allAuditViews.length === 0) {
+    showToast('没有可导出的视图', 'warning');
+    return;
+  }
+
+  let url = '/api/audit/views/export';
+  if (selectedViewIds.size > 0 && selectedViewIds.size < allAuditViews.length) {
+    url += `?ids=${Array.from(selectedViewIds).join(',')}`;
+  }
+
+  try {
+    const response = await fetch(`${API_BASE}${url}`, {
+      headers: {
+        'x-user-id': currentUserId
+      }
+    });
+
+    if (!response.ok) {
+      const data = await response.json();
+      throw new Error(data.error || '导出失败');
+    }
+
+    const blob = await response.blob();
+    const disposition = response.headers.get('content-disposition');
+    let filename = `audit_views_package_${Date.now()}.json`;
+    if (disposition) {
+      const match = disposition.match(/filename="?([^"]+)"?/);
+      if (match) filename = match[1];
+    }
+
+    const url2 = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url2;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    window.URL.revokeObjectURL(url2);
+
+    showToast('视图包导出成功');
+  } catch (err) {
+    console.error('Export failed:', err);
+    showToast(err.message || '导出失败', 'error');
+  }
+}
+
+async function exportViewById(id) {
+  try {
+    const response = await fetch(`${API_BASE}/audit/views/export?ids=${id}`, {
+      headers: {
+        'x-user-id': currentUserId
+      }
+    });
+
+    if (!response.ok) {
+      const data = await response.json();
+      throw new Error(data.error || '导出失败');
+    }
+
+    const blob = await response.blob();
+    const url2 = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url2;
+    a.download = `audit_view_${id}_${Date.now()}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    window.URL.revokeObjectURL(url2);
+
+    showToast('视图导出成功');
+  } catch (err) {
+    console.error('Export failed:', err);
+    showToast(err.message || '导出失败', 'error');
+  }
+}
+
+function openImportModal() {
+  openModal('导入审计视图包', `
+    <div class="form-group">
+      <label>选择导入文件</label>
+      <input type="file" id="importPackageFile" accept=".json" class="form-control">
+      <small style="color: #6b7280;">请选择之前导出的 JSON 视图包文件</small>
+    </div>
+    <div class="form-group">
+      <label>冲突处理方式</label>
+      <select id="importConflictMode">
+        <option value="skip">跳过已存在的视图（默认）</option>
+        <option value="overwrite">覆盖已存在的视图</option>
+      </select>
+      <small style="color: #6b7280;">单次最多导入 20 个视图</small>
+    </div>
+    <div id="importPreview" style="display: none;">
+      <div style="padding: 1rem; background: #f0f9ff; border-radius: 8px; margin-bottom: 1rem;">
+        <p id="importPreviewInfo" style="margin: 0;"></p>
+      </div>
+    </div>
+    <div class="form-actions">
+      <button type="button" class="btn btn-secondary" onclick="closeModal()">取消</button>
+      <button type="button" id="confirmImportBtn" class="btn btn-primary" disabled>确认导入</button>
+    </div>
+  `);
+
+  let selectedFile = null;
+  let fileContent = null;
+
+  document.getElementById('importPackageFile').addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    try {
+      const text = await file.text();
+      const pkg = JSON.parse(text);
+
+      if (!pkg.views || !Array.isArray(pkg.views)) {
+        throw new Error('无效的视图包文件，缺少 views 数组');
+      }
+
+      selectedFile = file;
+      fileContent = pkg;
+
+      document.getElementById('importPreview').style.display = 'block';
+      document.getElementById('importPreviewInfo').innerHTML = `
+        <strong>文件名称:</strong> ${file.name}<br>
+        <strong>包版本:</strong> v${pkg.package_version || 1}<br>
+        <strong>导出时间:</strong> ${pkg.exported_at || '未知'}<br>
+        <strong>视图数量:</strong> ${pkg.views.length} 个
+      `;
+
+      if (pkg.views.length > 20) {
+        document.getElementById('importPreviewInfo').innerHTML += `
+          <br><span style="color: #ef4444;"><strong>⚠️ 超过最大限制（20个），将被拒绝</strong></span>
+        `;
+        document.getElementById('confirmImportBtn').disabled = true;
+      } else {
+        document.getElementById('confirmImportBtn').disabled = false;
+      }
+    } catch (err) {
+      showToast('文件解析失败: ' + err.message, 'error');
+      document.getElementById('importPreview').style.display = 'none';
+      document.getElementById('confirmImportBtn').disabled = true;
+    }
+  });
+
+  document.getElementById('confirmImportBtn').addEventListener('click', async () => {
+    if (!fileContent) return;
+
+    const mode = document.getElementById('importConflictMode').value;
+    await performImport(fileContent, mode);
+  });
+}
+
+async function performImport(pkg, mode) {
+  try {
+    const result = await apiRequest('/audit/views/import', {
+      method: 'POST',
+      body: JSON.stringify({
+        package: pkg,
+        mode: mode
+      })
+    });
+
+    closeModal();
+    showImportResult(result);
+    await loadAuditViews();
+  } catch (err) {
+    console.error('Import failed:', err);
+    closeModal();
+    showToast(err.message || '导入失败', 'error');
+  }
+}
+
+function showImportResult(result) {
+  const statusColors = {
+    success: 'background: #d1fae5; color: #065f46;',
+    skipped: 'background: #fef3c7; color: #92400e;',
+    failed: 'background: #fee2e2; color: #991b1b;'
+  };
+
+  const statusText = {
+    success: '成功',
+    skipped: '跳过',
+    failed: '失败'
+  };
+
+  const actionText = {
+    create: '新建',
+    overwrite: '覆盖',
+    skip: '跳过',
+    rejected: '验证失败',
+    error: '处理错误'
+  };
+
+  const detailsHtml = result.details.map((d, i) => {
+    const warnings = d.warnings && d.warnings.length > 0
+      ? `<div style="font-size: 0.8rem; color: #f59e0b; margin-top: 0.25rem;">⚠️ ${d.warnings.join('<br>⚠️ ')}</div>`
+      : '';
+
+    const errors = d.errors && d.errors.length > 0
+      ? `<div style="font-size: 0.8rem; color: #ef4444; margin-top: 0.25rem;">❌ ${d.errors.join('<br>❌ ')}</div>`
+      : '';
+
+    const versionInfo = d.action === 'overwrite'
+      ? ` <small style="color: #6b7280;">(v${d.old_version} → v${d.new_version})</small>`
+      : d.version ? ` <small style="color: #6b7280;">(v${d.version})</small>` : '';
+
+    return `
+      <div style="padding: 0.75rem; border-radius: 6px; margin-bottom: 0.5rem; ${statusColors[d.status]}">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+          <span><strong>#${i + 1} ${d.name}</strong>${versionInfo}</span>
+          <span style="font-weight: 500;">[${actionText[d.action] || statusText[d.status]}]</span>
+        </div>
+        ${warnings}
+        ${errors}
+      </div>
+    `;
+  }).join('');
+
+  openModal('导入结果', `
+    <div style="margin-bottom: 1.5rem;">
+      <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem; margin-bottom: 1rem;">
+        <div style="text-align: center; padding: 1rem; background: #f3f4f6; border-radius: 8px;">
+          <div style="font-size: 1.5rem; font-weight: 600;">${result.total}</div>
+          <div style="font-size: 0.85rem; color: #6b7280;">总计</div>
+        </div>
+        <div style="text-align: center; padding: 1rem; background: #d1fae5; border-radius: 8px;">
+          <div style="font-size: 1.5rem; font-weight: 600; color: #065f46;">${result.imported}</div>
+          <div style="font-size: 0.85rem; color: #065f46;">新建</div>
+        </div>
+        <div style="text-align: center; padding: 1rem; background: #dbeafe; border-radius: 8px;">
+          <div style="font-size: 1.5rem; font-weight: 600; color: #1e40af;">${result.overwritten}</div>
+          <div style="font-size: 0.85rem; color: #1e40af;">覆盖</div>
+        </div>
+        <div style="text-align: center; padding: 1rem; background: #fee2e2; border-radius: 8px;">
+          <div style="font-size: 1.5rem; font-weight: 600; color: #991b1b;">${result.skipped + result.failed}</div>
+          <div style="font-size: 0.85rem; color: #991b1b;">跳过/失败</div>
+        </div>
+      </div>
+
+      <h4 style="margin-bottom: 0.75rem; color: #374151;">详细结果</h4>
+      <div style="max-height: 300px; overflow-y: auto;">
+        ${detailsHtml}
+      </div>
+    </div>
+
+    <div class="form-actions">
+      <button type="button" class="btn btn-primary" onclick="closeModal()">关闭</button>
+    </div>
+  `);
+}
+
+async function editView(id) {
+  try {
+    const data = await apiRequest(`/audit/views/${id}`);
+    const view = data.view;
+
+    const equipmentOptions = allEquipment.map(e =>
+      `<option value="${e.id}" ${e.id === view.equipment_id ? 'selected' : ''}>${e.device_code} - ${e.name}</option>`
+    ).join('');
+
+    const eventTypeData = await apiRequest('/audit/event-types');
+    const eventTypeOptions = eventTypeData.event_types.map(et =>
+      `<option value="${et.type}" ${view.event_types?.includes(et.type) ? 'selected' : ''}>${et.text}</option>`
+    ).join('');
+
+    openModal('编辑审计视图', `
+      <form id="editViewForm">
+        <div class="form-group">
+          <label>视图名称 *</label>
+          <input type="text" name="name" required value="${view.name}" maxlength="100">
+        </div>
+        <div class="form-group">
+          <label>描述</label>
+          <textarea name="description" placeholder="可选">${view.description || ''}</textarea>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label>设备 *</label>
+            <select name="equipment_id" required>
+              <option value="">请选择设备</option>
+              ${equipmentOptions}
+            </select>
+          </div>
+          <div class="form-group">
+            <label>导出格式 *</label>
+            <select name="export_format" required>
+              <option value="json" ${view.export_format === 'json' ? 'selected' : ''}>JSON</option>
+              <option value="csv" ${view.export_format === 'csv' ? 'selected' : ''}>CSV</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label>开始日期 *</label>
+            <input type="date" name="start_date" required value="${view.start_date ? view.start_date.substring(0, 10) : ''}">
+          </div>
+          <div class="form-group">
+            <label>结束日期 *</label>
+            <input type="date" name="end_date" required value="${view.end_date ? view.end_date.substring(0, 10) : ''}">
+          </div>
+        </div>
+        <div class="form-group">
+          <label>事件类型 *</label>
+          <select name="event_types" multiple required size="8">
+            ${eventTypeOptions}
+          </select>
+          <small style="color: #6b7280;">按住 Ctrl 可多选</small>
+        </div>
+        <div class="form-actions">
+          <button type="button" class="btn btn-secondary" onclick="closeModal()">取消</button>
+          <button type="submit" class="btn btn-primary">保存修改</button>
+        </div>
+      </form>
+    `);
+
+    document.getElementById('editViewForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const formData = new FormData(e.target);
+      const data = {
+        name: formData.get('name'),
+        description: formData.get('description') || null,
+        equipment_id: parseInt(formData.get('equipment_id')),
+        export_format: formData.get('export_format'),
+        start_date: formData.get('start_date'),
+        end_date: formData.get('end_date'),
+        event_types: formData.getAll('event_types')
+      };
+
+      try {
+        await apiRequest(`/audit/views/${id}`, {
+          method: 'PUT',
+          body: JSON.stringify(data)
+        });
+        showToast('视图更新成功');
+        closeModal();
+        await loadAuditViews();
+      } catch (err) {
+        console.error('Update failed:', err);
+      }
+    });
+  } catch (err) {
+    console.error('Load view failed:', err);
+  }
+}
+
+async function deleteView(id) {
+  if (!confirm('确定要删除此视图吗？此操作不可恢复。')) return;
+
+  try {
+    await apiRequest(`/audit/views/${id}`, {
+      method: 'DELETE'
+    });
+    showToast('视图删除成功');
+    selectedViewIds.delete(id);
+    await loadAuditViews();
+  } catch (err) {
+    console.error('Delete failed:', err);
+  }
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  const exportBtn = document.getElementById('exportViewsBtn');
+  const importBtn = document.getElementById('importViewsBtn');
+  const selectAllBtn = document.getElementById('selectAllViewsBtn');
+  const deselectAllBtn = document.getElementById('deselectAllViewsBtn');
+  const selectAllCheckbox = document.getElementById('selectAllViewsCheckbox');
+  const importFileInput = document.getElementById('importFileInput');
+
+  if (exportBtn) exportBtn.addEventListener('click', exportViewsPackage);
+  if (importBtn) importBtn.addEventListener('click', openImportModal);
+  if (selectAllBtn) selectAllBtn.addEventListener('click', selectAllViews);
+  if (deselectAllBtn) deselectAllBtn.addEventListener('click', deselectAllViews);
+  if (selectAllCheckbox) {
+    selectAllCheckbox.addEventListener('change', (e) => {
+      if (e.target.checked) {
+        selectAllViews();
+      } else {
+        deselectAllViews();
+      }
+    });
+  }
+
+  document.querySelectorAll('.nav-tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      const tabName = tab.dataset.tab;
+      document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
+      document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+      tab.classList.add('active');
+      document.getElementById(`${tabName}-tab`).classList.add('active');
+
+      if (tabName === 'history') {
+        loadEquipmentSelectors();
+      }
+      if (tabName === 'audit') {
+        loadEquipmentSelectors();
+        if (currentUser?.role === 'admin') {
+          loadAuditLogs();
+          loadAuditViews();
+        }
+      }
+    });
+  });
+});
 
 async function init() {
   await initUser();

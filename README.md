@@ -16,6 +16,7 @@
 - **📊 审计导出**：按设备或日期导出 CSV/JSON 格式的设备台账和借用记录
 - **📅 设备使用与维保日历包**：管理员专属导出，整合借用、归还、取消、维修全生命周期事件及冲突拦截记录
 - **📁 审计视图**：管理员可保存常用筛选条件为命名视图，一键重复导出，支持版本管理和权限控制
+- **📦 审计视图导入导出包**：管理员可批量导出审计视图为 JSON 包，在另一服务实例中导入，支持冲突处理、版本兼容和完整审计追踪
 
 ### 权限控制
 - **管理员**：设备管理、审批申请、维修管理、审计日志、数据导出
@@ -73,6 +74,9 @@ npm run test-timeline-export
 
 # 运行审计视图功能验证脚本
 npm run test-audit-views
+
+# 运行审计视图导入导出包功能验证脚本
+npm run test-audit-view-import-export
 
 # 运行所有测试
 npm run test-all
@@ -845,6 +849,8 @@ A.start < B.end AND A.end > B.start
 | **GET** | **`/audit/views/:id`** | **获取单个审计视图详情** | **仅管理员** |
 | **PUT** | **`/audit/views/:id`** | **更新审计视图（含重命名）** | **仅管理员** |
 | **DELETE** | **`/audit/views/:id`** | **删除审计视图** | **仅管理员** |
+| **GET** | **`/audit/views/export`** | **批量导出审计视图包（JSON）** | **仅管理员** |
+| **POST** | **`/audit/views/import`** | **导入审计视图包（JSON）** | **仅管理员** |
 
 #### 设备使用与维保日历包导出接口说明
 
@@ -1114,6 +1120,339 @@ A.start < B.end AND A.end > B.start
 | `INVALID_VIEW_PARAMS` | 视图参数验证失败 |
 | `VIEW_DELETE_FAILED` | 视图删除失败 |
 
+---
+
+## 📦 审计视图导入导出包
+
+管理员可以将当前保存的审计视图批量导出为标准 JSON 包，然后在另一服务实例中导入，实现审计视图的跨环境迁移和备份恢复。
+
+### 核心功能
+
+| 功能 | 说明 |
+|------|------|
+| **批量导出** | 导出全部或指定的审计视图为 JSON 包 |
+| **批量导入** | 从 JSON 包导入视图，支持 skip/overwrite 两种冲突处理模式 |
+| **数据追踪** | 名称、筛选条件、导出格式、版本、创建人信息完整可追溯 |
+| **非法字段清理** | 导入时自动忽略未知字段，保证数据安全 |
+| **旧版本兼容** | 旧版本包缺少字段时自动使用默认值补全 |
+| **数量限制** | 单次导入数量限制，默认 20 条，可通过环境变量配置 |
+| **重名处理** | 重名时可选择跳过或覆盖原视图 |
+| **审计日志** | 导入、覆盖、跳过、失败全部记录审计日志 |
+| **结果明细** | 返回每条视图的处理状态（成功/跳过/覆盖/失败）及警告、错误信息 |
+| **权限控制** | 仅管理员可执行导入导出操作 |
+
+### 环境配置
+
+| 环境变量 | 类型 | 默认值 | 说明 |
+|---------|------|--------|------|
+| `MAX_IMPORT_VIEWS` | number | 20 | 单次导入最大视图数量，超过返回 413 |
+
+### JSON 包格式
+
+导出的 JSON 包包含完整的元数据和视图数据：
+
+```json
+{
+  "package_version": 1,
+  "exported_at": "2026-06-05T10:30:00.000Z",
+  "exported_by": "系统管理员",
+  "exported_by_id": 1,
+  "view_count": 3,
+  "views": [
+    {
+      "name": "每周设备审计",
+      "description": "每周一导出的全量审计数据",
+      "equipment_id": 1,
+      "start_date": "2026-06-01",
+      "end_date": "2026-06-30",
+      "event_types": ["borrow_created", "borrow_approved", "borrow_conflict_blocked"],
+      "export_format": "json",
+      "version": 3,
+      "created_by": 1,
+      "created_by_name": "系统管理员",
+      "created_by_username": "admin",
+      "created_at": "2026-06-01T08:00:00.000Z",
+      "updated_at": "2026-06-05T10:00:00.000Z"
+    },
+    {
+      "name": "冲突拦截审计",
+      "description": "每周审计所有被拦截的借用和维修申请",
+      "equipment_id": 1,
+      "start_date": "2026-06-01",
+      "end_date": "2026-06-30",
+      "event_types": ["borrow_conflict_blocked", "maintenance_conflict_blocked"],
+      "export_format": "json",
+      "version": 1,
+      "created_by": 1,
+      "created_by_name": "系统管理员",
+      "created_by_username": "admin",
+      "created_at": "2026-06-02T09:00:00.000Z",
+      "updated_at": "2026-06-02T09:00:00.000Z"
+    }
+  ]
+}
+```
+
+### 导入校验规则
+
+导入时会对每条视图进行严格校验，确保数据完整性和合法性：
+
+| 校验项 | 规则 | 处理方式 |
+|--------|------|----------|
+| **必填字段** | `name`, `equipment_id`, `start_date`, `end_date`, `event_types`, `export_format` | 缺失返回错误，记录失败 |
+| **字段有效性** | 仅允许 `VALID_VIEW_FIELDS` 列表中的字段 | 非法字段自动忽略，记录警告 |
+| **设备ID** | 必须存在且有效 | 不存在返回错误，记录失败 |
+| **事件类型** | 必须是系统支持的事件类型 | 无效类型返回错误，记录失败 |
+| **导出格式** | 必须是 `json` 或 `csv` | 无效格式返回错误，记录失败 |
+| **日期格式** | 必须是 `YYYY-MM-DD` 或 `YYYY-MM-DD HH:mm:ss` | 无效格式返回错误，记录失败 |
+| **版本号** | 可选，正整数 | 缺失使用默认值 `1`，记录警告 |
+| **描述** | 可选，最多 500 字符 | 缺失使用默认值 `""`，记录警告 |
+| **数量限制** | 单次不超过 `MAX_IMPORT_VIEWS` | 超过返回 413，拒绝整个包 |
+
+### 冲突处理模式
+
+导入时可通过 `mode` 参数指定重名冲突处理方式：
+
+| 模式 | 说明 | 版本号处理 |
+|------|------|------------|
+| **`skip`**（默认） | 遇到重名视图时跳过不导入 | 不修改原视图版本号 |
+| **`overwrite`** | 遇到重名视图时覆盖原视图 | 原视图版本号 +1，导入包中的版本号被忽略 |
+
+> **注意**：覆盖操作会保留原视图的 `id` 和 `created_at`，仅更新内容字段和 `updated_at`。
+
+### 导入结果格式
+
+导入接口返回详细的处理结果，包含每条视图的状态：
+
+```json
+{
+  "success": true,
+  "total": 5,
+  "imported": 2,
+  "skipped": 1,
+  "overwritten": 1,
+  "failed": 1,
+  "details": [
+    {
+      "index": 0,
+      "name": "每周设备审计",
+      "status": "success",
+      "action": "create",
+      "view_id": 10,
+      "version": 3,
+      "warnings": [],
+      "errors": []
+    },
+    {
+      "index": 1,
+      "name": "冲突拦截审计",
+      "status": "success",
+      "action": "overwrite",
+      "view_id": 5,
+      "old_version": 2,
+      "new_version": 3,
+      "warnings": ["视图已存在，执行覆盖操作"],
+      "errors": []
+    },
+    {
+      "index": 2,
+      "name": "月度审计报告",
+      "status": "skipped",
+      "action": "skip",
+      "warnings": ["视图名称已存在，已跳过"],
+      "errors": []
+    },
+    {
+      "index": 3,
+      "name": "旧版本视图",
+      "status": "success",
+      "action": "create",
+      "view_id": 11,
+      "version": 1,
+      "warnings": [
+        "缺少字段 description，使用默认值",
+        "缺少字段 version，使用默认值 1",
+        "忽略未知字段: invalid_field, another_bad_field"
+      ],
+      "errors": []
+    },
+    {
+      "index": 4,
+      "name": "无效设备视图",
+      "status": "failed",
+      "action": "fail",
+      "warnings": [],
+      "errors": [
+        "设备ID 99999 不存在",
+        "无效的事件类型: invalid_event_type"
+      ]
+    }
+  ]
+}
+```
+
+### 审计日志
+
+所有导入导出操作都会记录详细的审计日志：
+
+| Action | 说明 | 记录时机 |
+|--------|------|----------|
+| `EXPORT_AUDIT_VIEW_PACKAGE` | 导出审计视图包 | 管理员执行导出时 |
+| `IMPORT_AUDIT_VIEW_PACKAGE` | 导入审计视图包 | 管理员执行导入时（总览日志） |
+| `IMPORT_AUDIT_VIEW_SUCCESS` | 单条视图导入成功 | 每条成功创建的视图 |
+| `OVERWRITE_AUDIT_VIEW_SUCCESS` | 单条视图覆盖成功 | 每条成功覆盖的视图 |
+| `SKIP_AUDIT_VIEW` | 单条视图跳过 | 每条因重名跳过的视图 |
+| `IMPORT_AUDIT_VIEW_FAILED` | 单条视图导入失败 | 每条校验失败的视图 |
+
+### 权限控制
+
+| 操作 | 管理员 | 普通用户 |
+|------|--------|----------|
+| 导出视图包 | ✅ | ❌ 返回 403，记录 `UNAUTHORIZED_ACCESS_ATTEMPT` |
+| 导入视图包 | ✅ | ❌ 返回 403，记录 `UNAUTHORIZED_ACCESS_ATTEMPT` |
+
+### 前端功能
+
+在「审计」标签页的「审计视图管理」区域提供完整的导入导出界面：
+
+| 功能 | 说明 |
+|------|------|
+| **视图选择** | 支持全选/取消全选，显示已选择数量 |
+| **批量导出** | 导出选中的视图（不选则导出全部） |
+| **导入按钮** | 打开导入模态框，支持文件选择和冲突模式选择 |
+| **导入预览** | 显示即将导入的视图数量和名称列表 |
+| **结果展示** | 导入后显示汇总卡片（总数/新建/覆盖/跳过/失败）和明细列表 |
+| **状态标识** | 每条结果使用不同颜色标识状态（绿/蓝/灰/红） |
+| **警告/错误** | 展开可查看每条视图的警告和错误详情 |
+
+#### 前端用户可见影响
+
+- **管理员**：在「审计」标签页看到「审计视图管理」区域，包含完整的导入导出功能
+- **普通用户**：不显示「审计视图管理」区域，也无法访问相关功能
+- **导入结果**：所有导入操作都有明确的成功/失败提示，包含详细的每条视图处理结果
+
+### 新增 API 接口
+
+| 方法 | 路径 | 说明 | 权限 |
+|------|------|------|------|
+| **GET** | **`/audit/views/export`** | **批量导出审计视图包** | **仅管理员** |
+| **POST** | **`/audit/views/import`** | **导入审计视图包** | **仅管理员** |
+
+#### 1. 批量导出审计视图包
+
+**接口**：`GET /api/audit/views/export`
+
+**请求参数**（Query String）：
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `ids` | string | 否 | 视图 ID 列表，逗号分隔，如 `1,2,3`。不指定则导出全部。 |
+
+**成功响应**（HTTP 200）：
+
+返回 JSON 格式的视图包，`Content-Type: application/json`，可直接下载保存。
+
+```json
+{
+  "package_version": 1,
+  "exported_at": "2026-06-05T10:30:00.000Z",
+  "exported_by": "系统管理员",
+  "exported_by_id": 1,
+  "view_count": 5,
+  "views": [...]
+}
+```
+
+> **提示**：前端可通过 `Content-Disposition` 响应头获取建议的文件名，格式为 `audit-views-export-YYYYMMDD-HHMMSS.json`。
+
+#### 2. 导入审计视图包
+
+**接口**：`POST /api/audit/views/import`
+
+**请求体**：
+
+```json
+{
+  "package": {
+    "package_version": 1,
+    "views": [...]
+  },
+  "mode": "skip"
+}
+```
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `package` | object | 是 | 符合格式的视图包对象 |
+| `mode` | string | 否 | 冲突处理模式：`skip`（默认）或 `overwrite` |
+
+**成功响应 - 部分成功**（HTTP 200）：
+
+即使部分视图导入失败，只要请求格式正确，仍返回 HTTP 200，通过 `details` 字段标识每条结果。
+
+```json
+{
+  "success": true,
+  "total": 3,
+  "imported": 1,
+  "skipped": 1,
+  "overwritten": 0,
+  "failed": 1,
+  "details": [...]
+}
+```
+
+**失败响应 - 包格式错误**（HTTP 400）：
+
+```json
+{
+  "error": "导入包缺少 views 数组",
+  "code": "MISSING_VIEWS_ARRAY"
+}
+```
+
+**失败响应 - 无效导入模式**（HTTP 400）：
+
+```json
+{
+  "error": "无效的导入模式，必须是 'skip' 或 'overwrite'",
+  "code": "INVALID_IMPORT_MODE"
+}
+```
+
+**失败响应 - 数量超限**（HTTP 413）：
+
+```json
+{
+  "error": "导入数量超过限制，最大 20 个，实际 21 个",
+  "code": "IMPORT_QUANTITY_EXCEEDED",
+  "max_import_limit": 20,
+  "actual_count": 21
+}
+```
+
+### 新增错误码
+
+| 错误码 | HTTP 状态码 | 说明 |
+|--------|------------|------|
+| `MISSING_VIEWS_ARRAY` | 400 | 导入包缺少 views 数组 |
+| `EMPTY_VIEWS_ARRAY` | 400 | views 数组为空 |
+| `INVALID_PACKAGE_VERSION` | 400 | 包版本号无效或不兼容 |
+| `INVALID_IMPORT_MODE` | 400 | 导入模式无效（必须是 skip 或 overwrite） |
+| `IMPORT_QUANTITY_EXCEEDED` | 413 | 导入数量超过限制 |
+
+### 与现有功能的兼容性
+
+本功能完全不破坏现有审计视图的操作逻辑：
+
+| 现有功能 | 影响说明 |
+|---------|----------|
+| 按视图导出 (`GET /audit/export/timeline?view_id=:id`) | ✅ 完全不变，继续使用 |
+| 创建视图 (`POST /audit/views`) | ✅ 完全不变，继续使用 |
+| 更新视图 (`PUT /audit/views/:id`) | ✅ 完全不变，继续使用 |
+| 删除视图 (`DELETE /audit/views/:id`) | ✅ 完全不变，继续使用 |
+| 查询视图列表/详情 | ✅ 完全不变，继续使用 |
+
 ## 🛠️ 技术栈
 
 - **后端框架**：Express.js
@@ -1146,6 +1485,11 @@ A.start < B.end AND A.end > B.start
 | `VIEW_NOT_FOUND` | 审计视图不存在或已删除 |
 | `INVALID_VIEW_PARAMS` | 审计视图参数验证失败 |
 | `VIEW_DELETE_FAILED` | 审计视图删除失败 |
+| `MISSING_VIEWS_ARRAY` | 导入包缺少 views 数组 |
+| `EMPTY_VIEWS_ARRAY` | views 数组为空 |
+| `INVALID_PACKAGE_VERSION` | 包版本号无效或不兼容 |
+| `INVALID_IMPORT_MODE` | 导入模式无效（必须是 skip 或 overwrite） |
+| `IMPORT_QUANTITY_EXCEEDED` | 导入数量超过限制 |
 
 ## 📄 License
 

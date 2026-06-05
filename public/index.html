@@ -206,6 +206,38 @@
           </div>
         </div>
 
+        <div class="audit-section" style="display:none;" id="auditViewsSection">
+          <h3>📁 审计视图管理</h3>
+          <div class="toolbar" style="margin-bottom: 1rem;">
+            <div class="filters">
+              <button class="btn btn-primary" id="exportViewsBtn">📤 导出视图包</button>
+              <button class="btn btn-success" id="importViewsBtn">📥 导入视图包</button>
+              <button class="btn btn-secondary" id="selectAllViewsBtn">全选</button>
+              <button class="btn btn-secondary" id="deselectAllViewsBtn">取消全选</button>
+            </div>
+            <div class="filters">
+              <span id="selectedViewsCount" style="color: #6b7280; font-size: 0.9rem;">已选择: 0 个</span>
+            </div>
+          </div>
+          <div class="table-container">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th style="width: 40px;"><input type="checkbox" id="selectAllViewsCheckbox"></th>
+                  <th>视图名称</th>
+                  <th>描述</th>
+                  <th>导出格式</th>
+                  <th>版本</th>
+                  <th>创建时间</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody id="auditViewsTableBody"></tbody>
+            </table>
+          </div>
+          <input type="file" id="importFileInput" accept=".json" style="display: none;">
+        </div>
+
         <div class="audit-section" style="display:none;" id="auditLogsSection">
           <h3>📝 审计日志</h3>
           <div class="toolbar">

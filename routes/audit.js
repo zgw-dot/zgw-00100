@@ -13,12 +13,15 @@ const {
   getAllAuditViews,
   updateAuditView,
   deleteAuditView,
-  EVENT_TYPE_MAP
+  exportAuditViews,
+  importAuditViews,
+  EVENT_TYPE_MAP,
+  VALID_EXPORT_FORMATS,
+  MAX_IMPORT_VIEWS
 } = require('../database');
 const { authenticate, requireAdmin } = require('../middleware/auth');
 
 const VALID_EVENT_TYPES = Object.keys(EVENT_TYPE_MAP);
-const VALID_EXPORT_FORMATS = ['json', 'csv'];
 
 function validateViewParams(params, isUpdate = false) {
   const errors = [];
@@ -694,6 +697,174 @@ router.post('/views', authenticate, requireAdmin, async (req, res) => {
 router.get('/views', authenticate, requireAdmin, async (req, res) => {
   const views = await getAllAuditViews();
   res.json({ views });
+});
+
+router.get('/views/export', authenticate, requireAdmin, async (req, res) => {
+  try {
+    let viewIds = null;
+    const idsParam = req.query.ids;
+
+    if (idsParam && typeof idsParam === 'string' && idsParam.trim().length > 0) {
+      viewIds = idsParam.split(',').map(id => parseInt(id.trim(), 10)).filter(id => !isNaN(id) && id > 0);
+      if (viewIds.length === 0) {
+        return res.status(400).json({
+          error: '无效的视图ID列表',
+          code: 'INVALID_VIEW_IDS'
+        });
+      }
+    }
+
+    const pkg = await exportAuditViews(viewIds);
+
+    logAction(
+      req.user.id,
+      'EXPORT_AUDIT_VIEW_PACKAGE',
+      'audit_view',
+      null,
+      {
+        view_count: pkg.view_count,
+        view_ids: viewIds,
+        exported_at: pkg.exported_at
+      },
+      req.ip
+    ).catch(err => console.error('记录审计日志失败:', err));
+
+    const filename = `audit_views_package_${Date.now()}.json`;
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.json(pkg);
+  } catch (err) {
+    console.error('导出视图包失败:', err);
+    res.status(500).json({
+      error: '导出视图包失败',
+      code: 'EXPORT_PACKAGE_FAILED',
+      details: err.message
+    });
+  }
+});
+
+router.post('/views/import', authenticate, requireAdmin, async (req, res) => {
+  try {
+    const { package: pkg, mode = 'skip' } = req.body;
+
+    if (!pkg) {
+      return res.status(400).json({
+        error: '缺少导入包数据',
+        code: 'MISSING_IMPORT_PACKAGE'
+      });
+    }
+
+    if (mode !== 'skip' && mode !== 'overwrite') {
+      return res.status(400).json({
+        error: '无效的导入模式，必须是 skip 或 overwrite',
+        code: 'INVALID_IMPORT_MODE'
+      });
+    }
+
+    const results = await importAuditViews(pkg, req.user.id, mode);
+
+    for (const detail of results.details) {
+      let actionType = null;
+      let details = {
+        view_name: detail.name,
+        original_index: detail.index,
+        warnings: detail.warnings
+      };
+
+      if (detail.status === 'success') {
+        if (detail.action === 'create') {
+          actionType = 'IMPORT_AUDIT_VIEW_SUCCESS';
+          details.view_id = detail.view_id;
+          details.version = detail.version;
+        } else if (detail.action === 'overwrite') {
+          actionType = 'OVERWRITE_AUDIT_VIEW_SUCCESS';
+          details.view_id = detail.view_id;
+          details.old_version = detail.old_version;
+          details.new_version = detail.new_version;
+        }
+      } else if (detail.status === 'skipped') {
+        actionType = 'SKIP_AUDIT_VIEW';
+        details.reason = '视图名称已存在';
+      } else if (detail.status === 'failed') {
+        actionType = 'IMPORT_AUDIT_VIEW_FAILED';
+        details.errors = detail.errors;
+        details.reason = detail.action === 'rejected' ? '验证失败' : '处理错误';
+      }
+
+      if (actionType) {
+        logAction(
+          req.user.id,
+          actionType,
+          'audit_view',
+          detail.view_id || null,
+          details,
+          req.ip
+        ).catch(err => console.error('记录审计日志失败:', err));
+      }
+    }
+
+    logAction(
+      req.user.id,
+      'IMPORT_AUDIT_VIEW_PACKAGE',
+      'audit_view',
+      null,
+      {
+        total: results.total,
+        imported: results.imported,
+        skipped: results.skipped,
+        overwritten: results.overwritten,
+        failed: results.failed,
+        mode: mode,
+        package_version: pkg.package_version
+      },
+      req.ip
+    ).catch(err => console.error('记录审计日志失败:', err));
+
+    res.json({
+      success: true,
+      ...results,
+      max_import_limit: MAX_IMPORT_VIEWS
+    });
+  } catch (err) {
+    console.error('导入视图包失败:', err);
+
+    const errorMessage = err.message || '导入失败';
+    const errorCode = errorMessage.includes('数量超过限制') ? 'IMPORT_QUANTITY_EXCEEDED' :
+                      errorMessage.includes('无效的导入包格式') ? 'INVALID_PACKAGE_FORMAT' :
+                      errorMessage.includes('缺少 views 数组') ? 'MISSING_VIEWS_ARRAY' :
+                      'IMPORT_PACKAGE_FAILED';
+
+    const statusCode = errorCode === 'IMPORT_QUANTITY_EXCEEDED' ? 413 :
+                       errorCode === 'INVALID_PACKAGE_FORMAT' || errorCode === 'MISSING_VIEWS_ARRAY' ? 400 : 500;
+
+    logAction(
+      req.user.id,
+      'IMPORT_AUDIT_VIEW_PACKAGE_FAILED',
+      'audit_view',
+      null,
+      {
+        error: errorMessage,
+        error_code: errorCode,
+        mode: mode
+      },
+      req.ip
+    ).catch(err => console.error('记录审计日志失败:', err));
+
+    const responseBody = {
+      error: errorMessage,
+      code: errorCode,
+      max_import_limit: MAX_IMPORT_VIEWS
+    };
+
+    if (errorCode === 'IMPORT_QUANTITY_EXCEEDED') {
+      const actualMatch = errorMessage.match(/当前 (\d+) 个/);
+      if (actualMatch) {
+        responseBody.actual_count = parseInt(actualMatch[1], 10);
+      }
+    }
+
+    res.status(statusCode).json(responseBody);
+  }
 });
 
 router.get('/views/:id', authenticate, requireAdmin, async (req, res) => {
