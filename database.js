@@ -283,7 +283,20 @@ function filterConflictsByPermission(conflicts, user) {
         applicant_id: null
       };
     } else {
-      return conflict;
+      if (conflict.reporter_id === user.id) {
+        return conflict;
+      }
+      return {
+        type: conflict.type,
+        maintenance_no: conflict.maintenance_no,
+        status: conflict.status,
+        start_date: conflict.start_date,
+        end_date: conflict.end_date,
+        overlap_start: conflict.overlap_start,
+        overlap_end: conflict.overlap_end,
+        reporter_name: '其他用户',
+        reporter_id: null
+      };
     }
   });
 }

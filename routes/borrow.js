@@ -192,14 +192,6 @@ router.post('/', authenticate, async (req, res) => {
     return res.status(404).json({ error: '设备不存在', code: 'EQUIPMENT_NOT_FOUND' });
   }
 
-  if (equipment.status === 'maintenance') {
-    return res.status(400).json({
-      error: `设备"${equipment.name}"当前处于维修状态，无法申请借用`,
-      code: 'EQUIPMENT_IN_MAINTENANCE',
-      details: { equipment_id, status: equipment.status }
-    });
-  }
-
   if (equipment.status === 'frozen') {
     return res.status(400).json({
       error: `设备"${equipment.name}"已被冻结，无法申请借用`,
@@ -276,6 +268,14 @@ router.post('/', authenticate, async (req, res) => {
           device_code: equipment.device_code
         }
       }
+    });
+  }
+
+  if (equipment.status === 'maintenance') {
+    return res.status(400).json({
+      error: `设备"${equipment.name}"当前处于维修状态，无法申请借用`,
+      code: 'EQUIPMENT_IN_MAINTENANCE',
+      details: { equipment_id, status: equipment.status }
     });
   }
 
