@@ -24,7 +24,8 @@ function makeRequest(method, path, headers = {}, body = null) {
         try {
           resolve({
             status: res.statusCode,
-            data: JSON.parse(data)
+            data: JSON.parse(data),
+            headers: res.headers
           });
         } catch (e) {
           resolve({
@@ -76,6 +77,59 @@ async function runTests() {
   }
   console.log();
 
+  // 测试 1.5: 时间线字段对齐验证（新增）
+  console.log('📋 测试 1.5: 时间线字段对齐验证（event_time, user_name, repair_note）');
+  console.log('   验证 API 返回字段与前端读取字段一致');
+  try {
+    const res = await makeRequest('GET', '/audit/timeline?equipment_id=1');
+    if (res.status === 200 && res.data.timeline.length > 0) {
+      const events = res.data.timeline;
+      let allFieldsValid = true;
+
+      // 验证所有事件都有 event_time 和 user_name
+      for (let i = 0; i < events.length; i++) {
+        const e = events[i];
+        if (!e.event_time) {
+          console.log(`   ❌ 事件 ${i + 1} 缺少 event_time`);
+          allFieldsValid = false;
+        }
+        if (!e.user_name) {
+          console.log(`   ❌ 事件 ${i + 1} 缺少 user_name`);
+          allFieldsValid = false;
+        }
+      }
+
+      // 验证维修事件有 repair_note
+      const maintenanceEvents = events.filter(e => e.type === 'maintenance');
+      for (let i = 0; i < maintenanceEvents.length; i++) {
+        const e = maintenanceEvents[i];
+        if (e.status === 'completed' && !e.repair_note) {
+          console.log(`   ❌ 维修事件 ${i + 1} 缺少 repair_note`);
+          allFieldsValid = false;
+        }
+      }
+
+      if (allFieldsValid) {
+        console.log('   ✅ 测试通过 - 所有字段对齐');
+        console.log(`      event_time: ${events[0].event_time}`);
+        console.log(`      user_name: ${events[0].user_name}`);
+        if (maintenanceEvents.length > 0) {
+          console.log(`      维修事件 repair_note: ${maintenanceEvents[0].repair_note || 'N/A (未完成)'}`);
+        }
+        passed++;
+      } else {
+        console.log('   ❌ 测试失败 - 存在字段不匹配');
+        failed++;
+      }
+    } else {
+      console.log('   ⚠️  跳过 - 无时间线事件');
+    }
+  } catch (e) {
+    console.log('   ❌ 测试失败:', e.message);
+    failed++;
+  }
+  console.log();
+
   // 测试 2: 时间线 API - 路径参数方式（兼容）
   console.log('📋 测试 2: 时间线 API - 路径参数方式');
   console.log('   请求: GET /api/audit/timeline/1');
@@ -96,18 +150,61 @@ async function runTests() {
   }
   console.log();
 
-  // 测试 3: 导出 - /export/equipment 路径
-  console.log('📋 测试 3: 导出 - /export/equipment 路径');
-  console.log('   请求: GET /api/audit/export/equipment?format=json');
+  // 测试 3: 设备台账导出 - 不含借用表头（新增）
+  console.log('📋 测试 3: 设备台账导出 - 验证不含借用表头，与设备列表对齐');
+  console.log('   请求: GET /api/audit/export/equipment?format=csv');
   try {
-    const res = await makeRequest('GET', '/audit/export/equipment?format=json');
-    if (res.status === 200 && (res.data.records || res.headers['content-type']?.includes('json'))) {
-      console.log('   ✅ 测试通过');
-      console.log(`      Content-Type: ${res.headers?.['content-type'] || 'application/json'}`);
+    const csvRes = await makeRequest('GET', '/audit/export/equipment?format=csv');
+    const hasDeviceCode = csvRes.data.includes('设备编号');
+    const hasNoRequestNo = !csvRes.data.includes('申请单号');
+    const hasNoApplicant = !csvRes.data.includes('申请人');
+
+    console.log(`   包含"设备编号": ${hasDeviceCode}`);
+    console.log(`   不包含"申请单号": ${hasNoRequestNo}`);
+    console.log(`   不包含"申请人": ${hasNoApplicant}`);
+
+    if (csvRes.status === 200 && hasDeviceCode && hasNoRequestNo && hasNoApplicant) {
+      console.log('   ✅ CSV 表头验证通过 - 是设备台账格式');
+    } else {
+      console.log('   ❌ CSV 表头验证失败 - 包含借用字段');
+      failed++;
+    }
+
+    // 验证 JSON 导出与设备列表一致
+    console.log();
+    console.log('   验证 JSON 导出与 GET /equipment 设备列表一致');
+    const eqListRes = await makeRequest('GET', '/equipment');
+    const eqJsonRes = await makeRequest('GET', '/audit/export/equipment?format=json');
+
+    let eqJsonData = eqJsonRes.data;
+    if (typeof eqJsonData === 'string') {
+      eqJsonData = JSON.parse(eqJsonData);
+    }
+
+    const listCount = (eqListRes.data.equipment || []).length;
+    const exportCount = (eqJsonData.records || []).length;
+
+    console.log(`   设备列表: ${listCount} 台，导出记录: ${exportCount} 条`);
+
+    if (eqJsonRes.status === 200 && listCount === exportCount && listCount > 0) {
+      const listFirst = eqListRes.data.equipment[0];
+      const exportFirst = eqJsonData.records[0];
+      const firstMatch = listFirst.device_code === exportFirst.device_code &&
+                         listFirst.name === exportFirst.name &&
+                         listFirst.status_text === exportFirst.status_text;
+      if (firstMatch) {
+        console.log('   ✅ 测试通过 - 记录数一致，首条记录匹配');
+        console.log(`      设备编号: ${listFirst.device_code}`);
+        passed++;
+      } else {
+        console.log('   ❌ 测试失败 - 首条记录不匹配');
+        failed++;
+      }
+    } else if (listCount === exportCount) {
+      console.log('   ✅ 测试通过 - 记录数一致');
       passed++;
     } else {
-      console.log('   ❌ 测试失败');
-      console.log(`      状态码: ${res.status}`);
+      console.log('   ❌ 测试失败 - 记录数不一致');
       failed++;
     }
   } catch (e) {
@@ -116,17 +213,22 @@ async function runTests() {
   }
   console.log();
 
-  // 测试 4: 导出 - /export/borrow 路径
-  console.log('📋 测试 4: 导出 - /export/borrow 路径');
-  console.log('   请求: GET /api/audit/export/borrow?format=json');
+  // 测试 4: 借用记录导出 - 含借用表头（新增）
+  console.log('📋 测试 4: 借用记录导出 - 验证含借用表头');
+  console.log('   请求: GET /api/audit/export/borrow?format=csv');
   try {
-    const res = await makeRequest('GET', '/audit/export/borrow?format=json');
-    if (res.status === 200) {
-      console.log('   ✅ 测试通过');
+    const csvRes = await makeRequest('GET', '/audit/export/borrow?format=csv');
+    const hasRequestNo = csvRes.data.includes('申请单号');
+    const hasApplicant = csvRes.data.includes('申请人');
+
+    console.log(`   包含"申请单号": ${hasRequestNo}`);
+    console.log(`   包含"申请人": ${hasApplicant}`);
+
+    if (csvRes.status === 200 && hasRequestNo && hasApplicant) {
+      console.log('   ✅ 测试通过 - 借用记录 CSV 格式正确');
       passed++;
     } else {
-      console.log('   ❌ 测试失败');
-      console.log(`      状态码: ${res.status}`);
+      console.log('   ❌ 测试失败 - 缺少借用字段');
       failed++;
     }
   } catch (e) {
@@ -135,13 +237,19 @@ async function runTests() {
   }
   console.log();
 
-  // 测试 5: 导出 - /export 基础路径
-  console.log('📋 测试 5: 导出 - /export 基础路径');
+  // 测试 5: 导出 - /export 基础路径（兼容，返回借用记录）
+  console.log('📋 测试 5: 导出 - /export 基础路径（兼容借用记录）');
   console.log('   请求: GET /api/audit/export?format=json');
   try {
     const res = await makeRequest('GET', '/audit/export?format=json');
-    if (res.status === 200) {
-      console.log('   ✅ 测试通过');
+    let exportData = res.data;
+    if (typeof exportData === 'string') {
+      exportData = JSON.parse(exportData);
+    }
+    // 借用记录应该有 request_no 字段
+    const hasRequestNo = exportData.records && exportData.records[0]?.request_no;
+    if (res.status === 200 && hasRequestNo) {
+      console.log('   ✅ 测试通过 - 返回借用记录（兼容旧版）');
       passed++;
     } else {
       console.log('   ❌ 测试失败');
@@ -226,8 +334,8 @@ async function runTests() {
   }
   console.log();
 
-  // 测试 7: 导出 CSV 与页面记录一致性验证
-  console.log('📋 测试 7: 导出数据与页面记录一致性');
+  // 测试 7: 借用导出 CSV 与页面记录一致性验证
+  console.log('📋 测试 7: 借用导出数据与页面记录一致性');
   console.log('   获取页面借用记录...');
   try {
     const pageRes = await makeRequest('GET', '/borrow');
@@ -237,7 +345,7 @@ async function runTests() {
     console.log('   获取 JSON 导出数据...');
     const exportRes = await makeRequest('GET', '/audit/export/borrow?format=json');
 
-    // 解析可能被 JSON.stringify 的响应
+    // 解析响应
     let exportData = exportRes.data;
     if (typeof exportData === 'string') {
       exportData = JSON.parse(exportData);

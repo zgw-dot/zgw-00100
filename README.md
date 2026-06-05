@@ -350,14 +350,29 @@ fetch('/api/borrow/1/return', {
 | 方法 | 路径 | 说明 | 权限 |
 |------|------|------|------|
 | GET | `/audit/logs` | 获取审计日志 | 管理员 |
-| GET | `/audit/export/equipment` | 导出设备台账 | 管理员 |
-| GET | `/audit/export/borrow` | 导出借用记录 | 管理员 |
+| GET | `/audit/export/equipment` | 导出设备台账（CSV/JSON） | 管理员 |
+| GET | `/audit/export/borrow` | 导出借用记录（CSV/JSON） | 管理员 |
+| GET | `/audit/export` | 导出借用记录（兼容旧版） | 管理员 |
 | GET | `/audit/timeline` | 获取设备时间线 | 所有用户 |
+| GET | `/audit/timeline?equipment_id=:id` | 按设备查询时间线（查询参数） | 所有用户 |
+| GET | `/audit/timeline/:equipment_id` | 按设备查询时间线（路径参数） | 所有用户 |
+
+**导出参数**：
+- `format`: `csv`（默认）或 `json`
+- `equipment_id`: 可选，按设备筛选
+- `start_date`: 可选，开始日期（含）
+- `end_date`: 可选，结束日期（含）
+
+**设备台账导出字段**：
+设备编号、设备名称、设备分类、规格型号、存放位置、状态、描述、创建时间、更新时间
+
+**借用记录导出字段**：
+申请单号、设备编号、设备名称、设备分类、申请人、审批人、借用用途、开始时间、结束时间、状态、领用时间、归还时间、验收结果、损坏备注、审批意见、创建时间
 
 ## 🛠️ 技术栈
 
 - **后端框架**：Express.js
-- **数据库**：SQLite (better-sqlite3)
+- **数据库**：SQLite (sqlite3)
 - **日期处理**：Moment.js
 - **前端**：原生 HTML/CSS/JavaScript（无框架依赖）
 - **跨域**：CORS

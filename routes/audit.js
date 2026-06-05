@@ -84,6 +84,7 @@ router.get('/timeline/:equipment_id?', authenticate, async (req, res) => {
 
   const borrowEvents = await all(`
     SELECT 'borrow' as type,
+           br.created_at as event_time,
            br.created_at as date,
            br.status,
            br.purpose,
@@ -93,6 +94,7 @@ router.get('/timeline/:equipment_id?', authenticate, async (req, res) => {
            br.returned_at,
            br.return_acceptance_result,
            br.return_damage_note,
+           u.name as user_name,
            u.name as applicant_name,
            a.name as approver_name,
            br.request_no
@@ -105,6 +107,7 @@ router.get('/timeline/:equipment_id?', authenticate, async (req, res) => {
 
   const maintenanceEvents = await all(`
     SELECT 'maintenance' as type,
+           mr.created_at as event_time,
            mr.created_at as date,
            mr.status,
            mr.issue_description,
@@ -112,7 +115,9 @@ router.get('/timeline/:equipment_id?', authenticate, async (req, res) => {
            mr.started_at,
            mr.completed_at,
            mr.repair_result,
+           mr.repair_result as repair_note,
            mr.damage_note,
+           u.name as user_name,
            u.name as reporter_name,
            t.name as technician_name
     FROM maintenance_records mr
@@ -124,6 +129,7 @@ router.get('/timeline/:equipment_id?', authenticate, async (req, res) => {
 
   const auditEvents = await all(`
     SELECT 'audit' as type,
+           al.created_at as event_time,
            al.created_at as date,
            al.action,
            al.details,
@@ -138,7 +144,7 @@ router.get('/timeline/:equipment_id?', authenticate, async (req, res) => {
     ...borrowEvents.map(e => ({ ...e, action_text: getBorrowActionText(e) })),
     ...maintenanceEvents.map(e => ({ ...e, action_text: getMaintenanceActionText(e) })),
     ...auditEvents.map(e => ({ ...e, action_text: getActionText(e.action) }))
-  ].sort((a, b) => new Date(b.date) - new Date(a.date));
+  ].sort((a, b) => new Date(b.event_time) - new Date(a.event_time));
 
   res.json({ equipment, timeline });
 });
@@ -164,7 +170,91 @@ function getMaintenanceActionText(event) {
   return statusMap[event.status] || '维修事件';
 }
 
-const exportHandler = async (req, res) => {
+function getEquipmentStatusText(status) {
+  const map = {
+    'available': '可用',
+    'borrowed': '已借出',
+    'maintenance': '维修中',
+    'frozen': '冻结'
+  };
+  return map[status] || status;
+}
+
+const exportEquipmentHandler = async (req, res) => {
+  const { format = 'csv', equipment_id, start_date, end_date } = req.query;
+
+  let sql = `
+    SELECT
+      e.id,
+      e.device_code,
+      e.name,
+      e.category,
+      e.model,
+      e.location,
+      e.status,
+      e.description,
+      e.created_at,
+      e.updated_at
+    FROM equipment e
+    WHERE 1=1
+  `;
+  const params = [];
+
+  if (equipment_id) {
+    sql += ' AND e.id = ?';
+    params.push(equipment_id);
+  }
+  if (start_date) {
+    sql += ' AND e.created_at >= ?';
+    params.push(start_date);
+  }
+  if (end_date) {
+    sql += ' AND e.created_at <= ?';
+    params.push(end_date);
+  }
+
+  sql += ' ORDER BY e.updated_at DESC';
+  const records = await all(sql, params);
+
+  records.forEach(r => {
+    r.status_text = getEquipmentStatusText(r.status);
+  });
+
+  if (format === 'json') {
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="equipment_export_${Date.now()}.json"`);
+    return res.json({ records, exported_at: new Date().toISOString() });
+  }
+
+  const headers = [
+    '设备编号', '设备名称', '设备分类', '规格型号', '存放位置',
+    '状态', '描述', '创建时间', '更新时间'
+  ];
+
+  const rows = records.map(r => [
+    r.device_code,
+    r.name,
+    r.category,
+    r.model || '',
+    r.location || '',
+    r.status_text,
+    r.description || '',
+    formatDate(r.created_at),
+    formatDate(r.updated_at)
+  ]);
+
+  const csvContent = [
+    headers.join(','),
+    ...rows.map(row => row.map(cell => `"${String(cell).replace(/"/g, '""')}"`).join(','))
+  ].join('\n');
+
+  const bom = '\uFEFF';
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="equipment_export_${Date.now()}.csv"`);
+  res.send(bom + csvContent);
+};
+
+const exportBorrowHandler = async (req, res) => {
   const { format = 'csv', equipment_id, start_date, end_date } = req.query;
 
   let sql = `
@@ -215,8 +305,8 @@ const exportHandler = async (req, res) => {
 
   if (format === 'json') {
     res.setHeader('Content-Type', 'application/json; charset=utf-8');
-    res.setHeader('Content-Disposition', `attachment; filename="audit_export_${Date.now()}.json"`);
-    return res.json(JSON.stringify({ records, exported_at: new Date().toISOString() }, null, 2));
+    res.setHeader('Content-Disposition', `attachment; filename="borrow_export_${Date.now()}.json"`);
+    return res.json({ records, exported_at: new Date().toISOString() });
   }
 
   const headers = [
@@ -251,7 +341,7 @@ const exportHandler = async (req, res) => {
 
   const bom = '\uFEFF';
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-  res.setHeader('Content-Disposition', `attachment; filename="audit_export_${Date.now()}.csv"`);
+  res.setHeader('Content-Disposition', `attachment; filename="borrow_export_${Date.now()}.csv"`);
   res.send(bom + csvContent);
 };
 
@@ -267,8 +357,8 @@ function getBorrowStatusText(status) {
   return map[status] || status;
 }
 
-router.get('/export', authenticate, requireAdmin, exportHandler);
-router.get('/export/equipment', authenticate, requireAdmin, exportHandler);
-router.get('/export/borrow', authenticate, requireAdmin, exportHandler);
+router.get('/export', authenticate, requireAdmin, exportBorrowHandler);
+router.get('/export/equipment', authenticate, requireAdmin, exportEquipmentHandler);
+router.get('/export/borrow', authenticate, requireAdmin, exportBorrowHandler);
 
 module.exports = router;
