@@ -29,25 +29,43 @@ function validateViewParams(params, isUpdate = false) {
     } else if (params.name.length > 100) {
       errors.push('视图名称不能超过100个字符');
     }
-  }
 
-  if (params.name !== undefined && params.name !== null) {
-    if (typeof params.name !== 'string' || params.name.trim().length === 0) {
-      errors.push('视图名称不能为空');
-    } else if (params.name.length > 100) {
-      errors.push('视图名称不能超过100个字符');
-    }
-  }
-
-  if (params.export_format !== undefined) {
-    if (!VALID_EXPORT_FORMATS.includes(params.export_format)) {
+    if (params.export_format === undefined || params.export_format === null) {
+      errors.push('导出格式不能为空');
+    } else if (!VALID_EXPORT_FORMATS.includes(params.export_format)) {
       errors.push(`导出格式必须是以下之一: ${VALID_EXPORT_FORMATS.join(', ')}`);
     }
-  }
 
-  if (params.event_types !== undefined && params.event_types !== null) {
-    if (!Array.isArray(params.event_types)) {
+    if (params.equipment_id === undefined || params.equipment_id === null) {
+      errors.push('设备ID不能为空');
+    } else if (typeof params.equipment_id !== 'number' || params.equipment_id <= 0) {
+      errors.push('设备ID必须是正整数');
+    }
+
+    if (params.start_date === undefined || params.start_date === null || params.start_date === '') {
+      errors.push('开始日期不能为空');
+    } else {
+      const date = new Date(params.start_date);
+      if (isNaN(date.getTime())) {
+        errors.push('开始日期格式无效');
+      }
+    }
+
+    if (params.end_date === undefined || params.end_date === null || params.end_date === '') {
+      errors.push('结束日期不能为空');
+    } else {
+      const date = new Date(params.end_date);
+      if (isNaN(date.getTime())) {
+        errors.push('结束日期格式无效');
+      }
+    }
+
+    if (params.event_types === undefined || params.event_types === null) {
+      errors.push('事件类型不能为空');
+    } else if (!Array.isArray(params.event_types)) {
       errors.push('事件类型必须是数组');
+    } else if (params.event_types.length === 0) {
+      errors.push('事件类型数组不能为空');
     } else {
       for (const et of params.event_types) {
         if (!VALID_EVENT_TYPES.includes(et)) {
@@ -55,27 +73,63 @@ function validateViewParams(params, isUpdate = false) {
         }
       }
     }
-  }
 
-  if (params.start_date !== undefined && params.start_date !== null) {
-    const date = new Date(params.start_date);
-    if (isNaN(date.getTime())) {
-      errors.push('开始日期格式无效');
+    if (params.start_date && params.end_date) {
+      const start = new Date(params.start_date);
+      const end = new Date(params.end_date);
+      if (start > end) {
+        errors.push('开始日期不能晚于结束日期');
+      }
     }
-  }
-
-  if (params.end_date !== undefined && params.end_date !== null) {
-    const date = new Date(params.end_date);
-    if (isNaN(date.getTime())) {
-      errors.push('结束日期格式无效');
+  } else {
+    if (params.name !== undefined && params.name !== null) {
+      if (typeof params.name !== 'string' || params.name.trim().length === 0) {
+        errors.push('视图名称不能为空');
+      } else if (params.name.length > 100) {
+        errors.push('视图名称不能超过100个字符');
+      }
     }
-  }
 
-  if (params.start_date && params.end_date) {
-    const start = new Date(params.start_date);
-    const end = new Date(params.end_date);
-    if (start > end) {
-      errors.push('开始日期不能晚于结束日期');
+    if (params.export_format !== undefined) {
+      if (!VALID_EXPORT_FORMATS.includes(params.export_format)) {
+        errors.push(`导出格式必须是以下之一: ${VALID_EXPORT_FORMATS.join(', ')}`);
+      }
+    }
+
+    if (params.event_types !== undefined && params.event_types !== null) {
+      if (!Array.isArray(params.event_types)) {
+        errors.push('事件类型必须是数组');
+      } else if (params.event_types.length === 0) {
+        errors.push('事件类型数组不能为空');
+      } else {
+        for (const et of params.event_types) {
+          if (!VALID_EVENT_TYPES.includes(et)) {
+            errors.push(`无效的事件类型: ${et}，有效值: ${VALID_EVENT_TYPES.join(', ')}`);
+          }
+        }
+      }
+    }
+
+    if (params.start_date !== undefined && params.start_date !== null && params.start_date !== '') {
+      const date = new Date(params.start_date);
+      if (isNaN(date.getTime())) {
+        errors.push('开始日期格式无效');
+      }
+    }
+
+    if (params.end_date !== undefined && params.end_date !== null && params.end_date !== '') {
+      const date = new Date(params.end_date);
+      if (isNaN(date.getTime())) {
+        errors.push('结束日期格式无效');
+      }
+    }
+
+    if (params.start_date && params.end_date) {
+      const start = new Date(params.start_date);
+      const end = new Date(params.end_date);
+      if (start > end) {
+        errors.push('开始日期不能晚于结束日期');
+      }
     }
   }
 

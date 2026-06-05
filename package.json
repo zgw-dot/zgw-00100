@@ -12,6 +12,7 @@
     "test-restart": "node test_restart_persistence.js",
     "test-timeline-export": "node test_timeline_export.js",
     "test-audit-views": "node test_audit_views.js",
+    "test-audit-views-required-fields": "node test_audit_views_required_fields.js",
     "test-all": "node test_maintenance_permission_fix.js && node test_availability.js && node test_timeline_export.js && node test_timeline_export_auto.js"
   },
   "keywords": ["equipment", "borrowing", "maintenance"],
