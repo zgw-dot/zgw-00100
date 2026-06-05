@@ -711,11 +711,13 @@ A.start < B.end AND A.end > B.start
 |------|------|------|------|
 | `name` | string | 是 | 视图名称，唯一，最多 100 字符 |
 | `description` | string | 否 | 视图描述说明 |
-| `equipment_id` | number | 否 | 指定设备ID |
-| `start_date` | string | 否 | 开始日期，格式 `YYYY-MM-DD` 或 `YYYY-MM-DD HH:mm:ss` |
-| `end_date` | string | 否 | 结束日期，格式 `YYYY-MM-DD` 或 `YYYY-MM-DD HH:mm:ss` |
-| `event_types` | array | 否 | 事件类型数组，如 `["borrow_created", "borrow_conflict_blocked"]` |
+| `equipment_id` | number | 是 | 指定设备ID，必须为正整数 |
+| `start_date` | string | 是 | 开始日期，格式 `YYYY-MM-DD` 或 `YYYY-MM-DD HH:mm:ss` |
+| `end_date` | string | 是 | 结束日期，格式 `YYYY-MM-DD` 或 `YYYY-MM-DD HH:mm:ss` |
+| `event_types` | array | 是 | 事件类型数组，如 `["borrow_created", "borrow_conflict_blocked"]`，不能为空 |
 | `export_format` | string | 是 | 导出格式：`json` 或 `csv` |
+
+> **注意**：以上必填规则仅适用于**创建视图** (`POST /api/audit/views`)。**更新视图** (`PUT /api/audit/views/:id`) 时所有字段均为可选，可单独更新部分字段。
 
 #### 按视图导出的元数据
 
@@ -743,6 +745,10 @@ A.start < B.end AND A.end > B.start
 // 示例：只筛选冲突拦截事件的视图
 {
   "name": "冲突拦截审计",
+  "description": "每周审计所有被拦截的借用和维修申请",
+  "equipment_id": 1,
+  "start_date": "2026-06-01",
+  "end_date": "2026-06-30",
   "event_types": ["borrow_conflict_blocked", "maintenance_conflict_blocked"],
   "export_format": "json"
 }
@@ -924,10 +930,25 @@ A.start < B.end AND A.end > B.start
 }
 ```
 
-**失败响应**：
-- HTTP 400 `INVALID_VIEW_PARAMS`：参数验证失败，包含详细错误列表
+**失败响应 - 参数验证失败**（HTTP 400）：
+```json
+{
+  "error": "参数验证失败",
+  "code": "INVALID_VIEW_PARAMS",
+  "details": [
+    "设备ID不能为空",
+    "开始日期不能为空",
+    "结束日期不能为空",
+    "事件类型不能为空"
+  ]
+}
+```
+
+**失败响应 - 其他错误**：
 - HTTP 409 `VIEW_NAME_DUPLICATE`：视图名称已存在
 - HTTP 404 `EQUIPMENT_NOT_FOUND`：指定的设备不存在
+
+> **提示**：`details` 数组会列出所有缺失或无效的字段，管理员可根据错误提示补全参数后重试。
 
 ##### 2. 查询所有审计视图
 
@@ -980,6 +1001,8 @@ A.start < B.end AND A.end > B.start
 ##### 4. 更新审计视图（含重命名）
 
 **接口**：`PUT /api/audit/views/:id`
+
+> **注意**：与创建视图不同，更新视图时**所有字段均为可选**，可单独更新部分或全部字段。未提供的字段保持原值不变。
 
 **请求体**（可更新部分或全部字段）：
 ```json
