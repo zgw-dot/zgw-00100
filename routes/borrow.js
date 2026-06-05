@@ -237,8 +237,8 @@ router.post('/', authenticate, async (req, res) => {
     await logAction(
       req.user.id,
       'BORROW_REQUEST_BLOCKED_BY_CONFLICT',
-      'borrow_request',
-      null,
+      'equipment',
+      equipment_id,
       {
         equipment_id,
         purpose,
@@ -248,6 +248,9 @@ router.post('/', authenticate, async (req, res) => {
         conflicts: conflicts.map(c => ({
           type: c.type,
           request_no: c.request_no || c.maintenance_no,
+          maintenance_no: c.maintenance_no,
+          applicant_id: c.applicant_id,
+          reporter_id: c.reporter_id,
           overlap_start: c.overlap_start,
           overlap_end: c.overlap_end
         }))

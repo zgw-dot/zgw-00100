@@ -134,16 +134,20 @@ router.post('/:id/start', authenticate, requireAdmin, async (req, res) => {
     await logAction(
       req.user.id,
       'MAINTENANCE_BLOCKED_BY_CONFLICT',
-      'maintenance_record',
-      id,
+      'equipment',
+      record.equipment_id,
       {
         equipment_id: record.equipment_id,
+        maintenance_id: id,
         start_date: maintenanceStart,
         end_date: maintenanceEnd,
         conflict_count: conflicts.length,
         conflicts: conflicts.map(c => ({
           type: c.type,
           request_no: c.request_no || c.maintenance_no,
+          maintenance_no: c.maintenance_no,
+          applicant_id: c.applicant_id,
+          reporter_id: c.reporter_id,
           overlap_start: c.overlap_start,
           overlap_end: c.overlap_end
         }))

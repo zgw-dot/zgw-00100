@@ -10,7 +10,8 @@
     "reset": "node -e \"const fs = require('fs'); if(fs.existsSync('./data/equipment.db')) fs.unlinkSync('./data/equipment.db'); console.log('Database reset')\"",
     "test-availability": "node test_availability.js",
     "test-restart": "node test_restart_persistence.js",
-    "test-all": "node test_fixes.js && node test_availability.js"
+    "test-timeline-export": "node test_timeline_export.js",
+    "test-all": "node test_maintenance_permission_fix.js && node test_availability.js && node test_timeline_export.js"
   },
   "keywords": ["equipment", "borrowing", "maintenance"],
   "author": "",

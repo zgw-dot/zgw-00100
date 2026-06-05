@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { get, all } = require('../database');
+const { get, all, getTimelineEvents, getEventText, getSourceType } = require('../database');
 const { authenticate, requireAdmin } = require('../middleware/auth');
 
 function getActionText(action) {
@@ -66,109 +66,6 @@ router.get('/logs', authenticate, requireAdmin, async (req, res) => {
 
   res.json({ logs });
 });
-
-router.get('/timeline/:equipment_id?', authenticate, async (req, res) => {
-  const equipment_id = req.params.equipment_id || req.query.equipment_id;
-
-  if (!equipment_id) {
-    return res.status(400).json({
-      error: '请指定设备ID',
-      code: 'MISSING_EQUIPMENT_ID'
-    });
-  }
-
-  const equipment = await get('SELECT * FROM equipment WHERE id = ?', [equipment_id]);
-  if (!equipment) {
-    return res.status(404).json({ error: '设备不存在', code: 'EQUIPMENT_NOT_FOUND' });
-  }
-
-  const borrowEvents = await all(`
-    SELECT 'borrow' as type,
-           br.created_at as event_time,
-           br.created_at as date,
-           br.status,
-           br.purpose,
-           br.start_date,
-           br.end_date,
-           br.collected_at,
-           br.returned_at,
-           br.return_acceptance_result,
-           br.return_damage_note,
-           u.name as user_name,
-           u.name as applicant_name,
-           a.name as approver_name,
-           br.request_no
-    FROM borrow_requests br
-    LEFT JOIN users u ON br.applicant_id = u.id
-    LEFT JOIN users a ON br.approver_id = a.id
-    WHERE br.equipment_id = ?
-    ORDER BY br.created_at DESC
-  `, [equipment_id]);
-
-  const maintenanceEvents = await all(`
-    SELECT 'maintenance' as type,
-           mr.created_at as event_time,
-           mr.created_at as date,
-           mr.status,
-           mr.issue_description,
-           mr.priority,
-           mr.started_at,
-           mr.completed_at,
-           mr.repair_result,
-           mr.repair_result as repair_note,
-           mr.damage_note,
-           u.name as user_name,
-           u.name as reporter_name,
-           t.name as technician_name
-    FROM maintenance_records mr
-    LEFT JOIN users u ON mr.reporter_id = u.id
-    LEFT JOIN users t ON mr.technician_id = t.id
-    WHERE mr.equipment_id = ?
-    ORDER BY mr.created_at DESC
-  `, [equipment_id]);
-
-  const auditEvents = await all(`
-    SELECT 'audit' as type,
-           al.created_at as event_time,
-           al.created_at as date,
-           al.action,
-           al.details,
-           u.name as user_name
-    FROM audit_logs al
-    LEFT JOIN users u ON al.user_id = u.id
-    WHERE al.resource_type = 'equipment' AND al.resource_id = ?
-    ORDER BY al.created_at DESC
-  `, [equipment_id]);
-
-  const timeline = [
-    ...borrowEvents.map(e => ({ ...e, action_text: getBorrowActionText(e) })),
-    ...maintenanceEvents.map(e => ({ ...e, action_text: getMaintenanceActionText(e) })),
-    ...auditEvents.map(e => ({ ...e, action_text: getActionText(e.action) }))
-  ].sort((a, b) => new Date(b.event_time) - new Date(a.event_time));
-
-  res.json({ equipment, timeline });
-});
-
-function getBorrowActionText(event) {
-  const statusMap = {
-    'pending': '提交借用申请',
-    'approved': '申请已批准',
-    'rejected': '申请已拒绝',
-    'collected': '设备已领用',
-    'returned': '设备已归还',
-    'cancelled': '申请已取消'
-  };
-  return statusMap[event.status] || '借用事件';
-}
-
-function getMaintenanceActionText(event) {
-  const statusMap = {
-    'pending': '提交维修申请',
-    'in_progress': '维修进行中',
-    'completed': '维修已完成'
-  };
-  return statusMap[event.status] || '维修事件';
-}
 
 function getEquipmentStatusText(status) {
   const map = {
@@ -357,8 +254,176 @@ function getBorrowStatusText(status) {
   return map[status] || status;
 }
 
+function filterTimelineByPermission(events, user) {
+  if (user.role === 'admin') {
+    return events;
+  }
+
+  return events.map(event => {
+    const isOperator = event.operator_id === user.id;
+    const filteredEvent = { ...event };
+
+    if (event.source_type === 'borrow' || event.source_type === 'maintenance') {
+      if (!isOperator) {
+        filteredEvent.operator_name = '其他用户';
+        filteredEvent.operator_id = null;
+        if (filteredEvent.details) {
+          if (filteredEvent.details.approval_comment) {
+            filteredEvent.details.approval_comment = null;
+          }
+          if (filteredEvent.details.return_damage_note) {
+            filteredEvent.details.return_damage_note = null;
+          }
+          if (filteredEvent.details.repair_result) {
+            filteredEvent.details.repair_result = null;
+          }
+          if (filteredEvent.details.damage_note) {
+            filteredEvent.details.damage_note = null;
+          }
+        }
+      }
+    }
+
+    if (event.event_type === 'borrow_conflict_blocked' || event.event_type === 'maintenance_conflict_blocked') {
+      if (filteredEvent.details && filteredEvent.details.conflicts) {
+        filteredEvent.details.conflicts = filteredEvent.details.conflicts.map(c => {
+          const isOwnConflict = (c.type === 'borrow' && c.applicant_id === user.id) ||
+                               (c.type === 'maintenance' && c.reporter_id === user.id);
+          if (!isOwnConflict) {
+            return {
+              type: c.type,
+              request_no: c.request_no,
+              maintenance_no: c.maintenance_no,
+              status: c.status,
+              overlap_start: c.overlap_start,
+              overlap_end: c.overlap_end,
+              applicant_name: c.type === 'borrow' ? '其他用户' : undefined,
+              reporter_name: c.type === 'maintenance' ? '其他用户' : undefined,
+              applicant_id: null,
+              reporter_id: null
+            };
+          }
+          return c;
+        });
+      }
+    }
+
+    return filteredEvent;
+  });
+}
+
+const exportTimelineHandler = async (req, res) => {
+  const { format = 'csv', equipment_id, start_date, end_date } = req.query;
+
+  if (format !== 'csv' && format !== 'json') {
+    return res.status(400).json({
+      error: '不支持的导出格式，仅支持 csv 和 json',
+      code: 'INVALID_EXPORT_FORMAT'
+    });
+  }
+
+  if (equipment_id) {
+    const equipment = await get('SELECT * FROM equipment WHERE id = ?', [equipment_id]);
+    if (!equipment) {
+      return res.status(404).json({
+        error: '设备不存在',
+        code: 'EQUIPMENT_NOT_FOUND'
+      });
+    }
+  }
+
+  const events = await getTimelineEvents(equipment_id, start_date, end_date);
+
+  const exportMeta = {
+    exported_at: new Date().toISOString(),
+    exported_by: req.user.name,
+    exported_by_id: req.user.id,
+    filters: {
+      equipment_id: equipment_id || null,
+      start_date: start_date || null,
+      end_date: end_date || null,
+      format: format
+    },
+    event_count: events.length,
+    equipment_info: equipment_id ? await get('SELECT id, device_code, name FROM equipment WHERE id = ?', [equipment_id]) : null
+  };
+
+  if (format === 'json') {
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    const filename = equipment_id
+      ? `timeline_equipment_${equipment_id}_${Date.now()}.json`
+      : `timeline_all_${Date.now()}.json`;
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    return res.json({
+      meta: exportMeta,
+      events: events
+    });
+  }
+
+  const headers = [
+    '事件ID', '事件时间', '事件类型', '事件描述', '来源类型', '来源ID',
+    '状态', '状态描述', '操作者ID', '操作者姓名',
+    '设备ID', '设备编号', '设备名称', '详情'
+  ];
+
+  const rows = events.map(e => [
+    e.event_id,
+    formatDate(e.event_time),
+    e.event_type,
+    e.event_text,
+    e.source_type,
+    e.source_id,
+    e.status,
+    e.status_text,
+    e.operator_id || '',
+    e.operator_name || '',
+    e.equipment_id || '',
+    e.device_code || '',
+    e.equipment_name || '',
+    JSON.stringify(e.details || {}).replace(/"/g, '""')
+  ]);
+
+  const csvContent = [
+    headers.join(','),
+    ...rows.map(row => row.map(cell => `"${String(cell)}"`).join(','))
+  ].join('\n');
+
+  const bom = '\uFEFF';
+  const filename = equipment_id
+    ? `timeline_equipment_${equipment_id}_${Date.now()}.csv`
+    : `timeline_all_${Date.now()}.csv`;
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+  res.send(bom + csvContent);
+};
+
+router.get('/timeline/:equipment_id?', authenticate, async (req, res) => {
+  const equipment_id = req.params.equipment_id || req.query.equipment_id;
+
+  if (!equipment_id) {
+    return res.status(400).json({
+      error: '请指定设备ID',
+      code: 'MISSING_EQUIPMENT_ID'
+    });
+  }
+
+  const equipment = await get('SELECT * FROM equipment WHERE id = ?', [equipment_id]);
+  if (!equipment) {
+    return res.status(404).json({ error: '设备不存在', code: 'EQUIPMENT_NOT_FOUND' });
+  }
+
+  const events = await getTimelineEvents(equipment_id);
+  const filteredEvents = filterTimelineByPermission(events, req.user);
+
+  res.json({
+    equipment,
+    timeline: filteredEvents
+  });
+});
+
 router.get('/export', authenticate, requireAdmin, exportBorrowHandler);
 router.get('/export/equipment', authenticate, requireAdmin, exportEquipmentHandler);
 router.get('/export/borrow', authenticate, requireAdmin, exportBorrowHandler);
+router.get('/export/timeline', authenticate, requireAdmin, exportTimelineHandler);
 
 module.exports = router;

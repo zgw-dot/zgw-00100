@@ -12,8 +12,9 @@
 - **📥 领用**：申请人或管理员确认领用设备
 - **📤 归还验收**：归还时填写验收结果和损坏备注
 - **🔩 维修冻结**：设备报修、开始维修、完成维修，自动冻结/解冻
-- **📜 历史记录**：按设备查看完整时间线（借用、维修、操作日志）
+- **📜 历史记录**：按设备查看完整时间线（借用、维修、操作日志），普通用户自动脱敏
 - **📊 审计导出**：按设备或日期导出 CSV/JSON 格式的设备台账和借用记录
+- **📅 设备使用与维保日历包**：管理员专属导出，整合借用、归还、取消、维修全生命周期事件及冲突拦截记录
 
 ### 权限控制
 - **管理员**：设备管理、审批申请、维修管理、审计日志、数据导出
@@ -65,6 +66,9 @@ npm run test-availability
 
 # 运行重启持久化验证脚本
 npm run test-restart
+
+# 运行时间线导出功能验证脚本
+npm run test-timeline-export
 
 # 运行所有测试
 npm run test-all
@@ -536,12 +540,152 @@ A.start < B.end AND A.end > B.start
 
 ### 支持的导出格式
 
-| 导出类型 | 格式 | 说明 |
-|---------|------|------|
-| 设备台账 | CSV / JSON | 包含设备基本信息、借用次数、维修次数 |
-| 借用记录 | CSV / JSON | 包含完整的借用申请、审批、领用、归还信息 |
+| 导出类型 | 格式 | 说明 | 权限 |
+|---------|------|------|------|
+| 设备台账 | CSV / JSON | 包含设备基本信息、借用次数、维修次数 | 管理员 |
+| 借用记录 | CSV / JSON | 包含完整的借用申请、审批、领用、归还信息 | 管理员 |
+| **设备使用与维保日历包** | **CSV / JSON** | **整合借用、维修、冲突拦截全生命周期事件** | **仅管理员** |
 
-### 导出筛选条件
+### 📅 设备使用与维保日历包导出
+
+管理员专属的完整时间线导出功能，串联设备从借用申请到维修完成的所有关键事件。
+
+#### 功能特点
+
+- **全事件覆盖**：包含借用申请、批准、拒绝、领用、归还、取消，以及维修申请、开始、完成
+- **冲突可追溯**：导出中包含借用和维修冲突拦截记录，可完整复核被拦截的申请
+- **稳定字段**：每条事件包含稳定的 `event_id`，跨服务重启保持一致
+- **标准排序**：按时间升序排列，时间相同时按 `event_id` 字典序稳定排序
+- **导出元数据**：包含导出时间、导出人、筛选条件等审计信息
+
+#### 导出筛选条件
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `format` | string | 否 | 导出格式，`csv`（默认）或 `json` |
+| `equipment_id` | number | 否 | 指定设备ID，不填则导出所有设备 |
+| `start_date` | string | 否 | 开始日期（含），格式 `YYYY-MM-DD` 或 `YYYY-MM-DD HH:mm:ss` |
+| `end_date` | string | 否 | 结束日期（含），格式 `YYYY-MM-DD` 或 `YYYY-MM-DD HH:mm:ss` |
+
+#### 导出事件类型
+
+| 事件类型 | 说明 | 来源 |
+|---------|------|------|
+| `borrow_created` | 提交借用申请 | 借用表 |
+| `borrow_approved` | 批准借用申请 | 借用表 |
+| `borrow_rejected` | 拒绝借用申请 | 借用表 |
+| `borrow_collected` | 领用设备 | 借用表 |
+| `borrow_returned` | 归还设备 | 借用表 |
+| `borrow_cancelled` | 取消借用申请 | 借用表 |
+| `maintenance_created` | 提交维修申请 | 维修表 |
+| `maintenance_started` | 开始维修 | 维修表 |
+| `maintenance_completed` | 完成维修 | 维修表 |
+| `borrow_conflict_blocked` | 借用申请因冲突被拦截 | 审计日志 |
+| `maintenance_conflict_blocked` | 维修因冲突被拦截 | 审计日志 |
+
+#### 标准导出字段
+
+| 字段 | 说明 |
+|------|------|
+| `event_id` | 稳定事件唯一标识，格式：`{来源}_{来源ID}_{动作}` |
+| `event_time` | 事件发生时间 |
+| `event_type` | 事件类型编码 |
+| `event_text` | 事件类型中文描述 |
+| `source_type` | 来源类型：`borrow` / `maintenance` / `audit` |
+| `source_id` | 来源记录ID |
+| `status` | 事件状态编码 |
+| `status_text` | 事件状态中文描述 |
+| `operator_id` | 操作者用户ID |
+| `operator_name` | 操作者姓名 |
+| `equipment_id` | 设备ID |
+| `device_code` | 设备编号 |
+| `equipment_name` | 设备名称 |
+| `details` | 事件扩展详情（JSON 格式） |
+
+#### JSON 导出示例
+
+```json
+{
+  "meta": {
+    "exported_at": "2026-06-05T10:30:00.000Z",
+    "exported_by": "系统管理员",
+    "exported_by_id": 1,
+    "filters": {
+      "equipment_id": 1,
+      "start_date": "2026-06-01",
+      "end_date": "2026-06-30",
+      "format": "json"
+    },
+    "event_count": 12,
+    "equipment_info": {
+      "id": 1,
+      "device_code": "NB-2024-001",
+      "name": "笔记本电脑"
+    }
+  },
+  "events": [
+    {
+      "event_id": "borrow_5_created",
+      "event_time": "2026-06-05 09:00:00",
+      "event_type": "borrow_created",
+      "event_text": "提交借用申请",
+      "source_type": "borrow",
+      "source_id": 5,
+      "status": "pending",
+      "status_text": "待审批",
+      "operator_id": 2,
+      "operator_name": "张三",
+      "equipment_id": 1,
+      "device_code": "NB-2024-001",
+      "equipment_name": "笔记本电脑",
+      "details": {
+        "request_no": "BR202606050001",
+        "purpose": "项目开发使用",
+        "period_start": "2026-06-10 09:00:00",
+        "period_end": "2026-06-15 18:00:00"
+      }
+    }
+  ]
+}
+```
+
+#### 冲突拦截事件复核示例
+
+```json
+{
+  "event_id": "conflict_102_0",
+  "event_time": "2026-06-05 10:00:00",
+  "event_type": "borrow_conflict_blocked",
+  "event_text": "借用申请因冲突被拦截",
+  "source_type": "audit",
+  "source_id": 102,
+  "status": "blocked",
+  "status_text": "已拦截",
+  "operator_id": 2,
+  "operator_name": "张三",
+  "equipment_id": 1,
+  "device_code": "NB-2024-001",
+  "equipment_name": "笔记本电脑",
+  "details": {
+    "conflict_count": 1,
+    "start_date": "2026-06-12 09:00:00",
+    "end_date": "2026-06-14 18:00:00",
+    "conflicts": [
+      {
+        "type": "maintenance",
+        "maintenance_no": "MR000003",
+        "status": "in_progress",
+        "overlap_start": "2026-06-12 09:00:00",
+        "overlap_end": "2026-06-14 18:00:00",
+        "reporter_name": "系统管理员",
+        "reporter_id": 1
+      }
+    ]
+  }
+}
+```
+
+### 通用导出筛选条件
 
 - **按设备**：选择特定设备导出相关记录
 - **按日期**：指定开始和结束日期筛选
@@ -554,6 +698,7 @@ A.start < B.end AND A.end > B.start
 - 状态文本使用中文描述
 - 日期格式统一
 - CSV 文件包含 UTF-8 BOM，确保中文在 Excel 中正常显示
+- 事件顺序跨服务重启保持一致（按时间升序 + event_id 字典序）
 
 ## 🔌 API 接口文档
 
@@ -604,9 +749,41 @@ A.start < B.end AND A.end > B.start
 | GET | `/audit/export/equipment` | 导出设备台账（CSV/JSON） | 管理员 |
 | GET | `/audit/export/borrow` | 导出借用记录（CSV/JSON） | 管理员 |
 | GET | `/audit/export` | 导出借用记录（兼容旧版） | 管理员 |
+| **GET** | **`/audit/export/timeline`** | **导出设备使用与维保日历包（CSV/JSON）** | **仅管理员** |
 | GET | `/audit/timeline` | 获取设备时间线 | 所有用户 |
 | GET | `/audit/timeline?equipment_id=:id` | 按设备查询时间线（查询参数） | 所有用户 |
 | GET | `/audit/timeline/:equipment_id` | 按设备查询时间线（路径参数） | 所有用户 |
+
+#### 设备使用与维保日历包导出接口说明
+
+**接口**：`GET /api/audit/export/timeline`
+
+**请求参数**（Query String）：
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `format` | string | 否 | 导出格式：`csv`（默认）或 `json` |
+| `equipment_id` | number | 否 | 设备ID，不指定则导出所有设备 |
+| `start_date` | string | 否 | 开始时间（含），格式：`YYYY-MM-DD` 或 `YYYY-MM-DD HH:mm:ss` |
+| `end_date` | string | 否 | 结束时间（含），格式：`YYYY-MM-DD` 或 `YYYY-MM-DD HH:mm:ss` |
+
+**权限控制**：
+- 管理员（`role = 'admin'`）：完整导出所有事件和字段
+- 普通用户：返回 HTTP 403，错误码 `ADMIN_REQUIRED`，错误信息：`需要管理员权限`
+
+**越权访问响应示例**（HTTP 403）：
+```json
+{
+  "error": "需要管理员权限",
+  "code": "ADMIN_REQUIRED"
+}
+```
+
+**用户可见影响**：
+- 普通用户在页面上不会看到导出按钮
+- 普通用户调用 API 会收到明确的权限拒绝错误
+- 普通用户查看设备时间线时，非本人操作的事件会被自动脱敏（`operator_name` 显示为"其他用户"，`operator_id` 为 `null`，敏感详情字段被隐藏）
+- 管理员导出的日历包包含完整信息，可用于审计和追溯
 
 **导出参数**：
 - `format`: `csv`（默认）或 `json`
@@ -647,6 +824,7 @@ A.start < B.end AND A.end > B.start
 | `INVALID_STATUS_FOR_RETURN` | 状态不允许归还 |
 | `ADMIN_REQUIRED` | 需要管理员权限 |
 | `ACCESS_DENIED` | 无访问权限 |
+| `INVALID_EXPORT_FORMAT` | 不支持的导出格式 |
 
 ## 📄 License
 
